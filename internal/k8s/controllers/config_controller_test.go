@@ -18,26 +18,18 @@ package controllers
 
 import (
 	"context"
-	"path/filepath"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/go-kit/log"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	. "github.com/onsi/gomega"
 	v1beta1 "go.universe.tf/metallb/api/v1beta1"
 	v1beta2 "go.universe.tf/metallb/api/v1beta2"
 	"go.universe.tf/metallb/internal/config"
-	metallbcfg "go.universe.tf/metallb/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	k8sscheme "k8s.io/client-go/kubernetes/scheme"
-	"sigs.k8s.io/controller-runtime/pkg/envtest"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 )
 
@@ -86,7 +78,7 @@ func TestConfigController(t *testing.T) {
 		},
 	}
 	for _, test := range tests {
-		var resources metallbcfg.ClusterResources
+		var resources config.ClusterResources
 		if test.validResources {
 			resources = configControllerValidResources
 		} else {
@@ -104,7 +96,7 @@ func TestConfigController(t *testing.T) {
 			t.Fatalf("test %s failed to create config, got unexpected error: %v", test.desc, err)
 		}
 
-		cmpOpt := cmpopts.IgnoreUnexported(metallbcfg.Pool{})
+		cmpOpt := cmpopts.IgnoreUnexported(config.Pool{})
 
 		mockHandler := func(l log.Logger, cfg *config.Config) SyncState {
 			if !cmp.Equal(expectedCfg, cfg, cmpOpt) {
@@ -119,7 +111,7 @@ func TestConfigController(t *testing.T) {
 		r := &ConfigReconciler{
 			Client:         fakeClient,
 			Logger:         log.NewNopLogger(),
-			Scheme:         scheme,
+			Scheme:         scheme.Scheme,
 			Namespace:      testNamespace,
 			ValidateConfig: config.DontValidate,
 			Handler:        mockHandler,
@@ -144,134 +136,83 @@ func TestConfigController(t *testing.T) {
 	}
 }
 
-func TestNodeEvent(t *testing.T) {
-	g := NewGomegaWithT(t)
-	testEnv := &envtest.Environment{
-		CRDDirectoryPaths:     []string{filepath.Join("../../..", "config", "crd", "bases")},
-		ErrorIfCRDPathMissing: true,
-		Scheme:                scheme,
+func TestSecretShouldntTrigger(t *testing.T) {
+	initObjects := objectsFromResources(configControllerValidResources)
+	fakeClient, err := newFakeClient(initObjects)
+	if err != nil {
+		t.Fatalf("test failed to create fake client: %v", err)
 	}
-	cfg, err := testEnv.Start()
-	g.Expect(err).To(BeNil())
-	defer func() {
-		err = testEnv.Stop()
-		g.Expect(err).To(BeNil())
-	}()
-	err = v1beta1.AddToScheme(k8sscheme.Scheme)
-	g.Expect(err).To(BeNil())
-	err = v1beta2.AddToScheme(k8sscheme.Scheme)
-	g.Expect(err).To(BeNil())
-	m, err := manager.New(cfg, manager.Options{MetricsBindAddress: "0"})
-	g.Expect(err).To(BeNil())
 
-	var configUpdate int
-	var mutex sync.Mutex
+	handlerCalled := false
 	mockHandler := func(l log.Logger, cfg *config.Config) SyncState {
-		mutex.Lock()
-		defer mutex.Unlock()
-		configUpdate++
+		handlerCalled = true
 		return SyncStateSuccess
 	}
-	var forceReload int
-	mockForceReload := func() {
-		mutex.Lock()
-		defer mutex.Unlock()
-		forceReload++
-	}
+
 	r := &ConfigReconciler{
-		Client:         m.GetClient(),
+		Client:         fakeClient,
 		Logger:         log.NewNopLogger(),
-		Scheme:         scheme,
+		Scheme:         scheme.Scheme,
 		Namespace:      testNamespace,
 		ValidateConfig: config.DontValidate,
 		Handler:        mockHandler,
-		ForceReload:    mockForceReload,
+		ForceReload:    func() {},
 	}
-	err = r.SetupWithManager(m)
-	g.Expect(err).To(BeNil())
-	ctx := context.Background()
-	go func() {
-		err = m.Start(ctx)
-		g.Expect(err).To(BeNil())
-	}()
-
-	// test new node event.
-	node := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-node"},
-		Spec:       corev1.NodeSpec{},
+	req := reconcile.Request{
+		NamespacedName: types.NamespacedName{
+			Namespace: testNamespace,
+		},
 	}
-	node.Labels = make(map[string]string)
-	node.Labels["test"] = "e2e"
-	err = m.GetClient().Create(ctx, node)
-	g.Expect(err).To(BeNil())
-	g.Eventually(func() int {
-		mutex.Lock()
-		defer mutex.Unlock()
-		return configUpdate
-	}, 5*time.Second, 200*time.Millisecond).Should(Equal(1))
-	g.Eventually(func() int {
-		mutex.Lock()
-		defer mutex.Unlock()
-		return forceReload
-	}, 5*time.Second, 200*time.Millisecond).Should(Equal(0))
 
-	// test update node event with no changes into node label.
-	g.Eventually(func() error {
-		err = m.GetClient().Get(ctx, types.NamespacedName{Name: "test-node"}, node)
-		if err != nil {
-			return err
-		}
-		node.Labels = make(map[string]string)
-		node.Spec.PodCIDR = "192.168.10.0/24"
-		node.Labels["test"] = "e2e"
-		err = m.GetClient().Update(ctx, node)
-		if err != nil {
-			return err
-		}
-		return nil
-	}, 5*time.Second, 200*time.Millisecond).Should(BeNil())
-	g.Eventually(func() int {
-		mutex.Lock()
-		defer mutex.Unlock()
-		return configUpdate
-	}, 5*time.Second, 200*time.Millisecond).Should(Equal(1))
-	g.Eventually(func() int {
-		mutex.Lock()
-		defer mutex.Unlock()
-		return forceReload
-	}, 5*time.Second, 200*time.Millisecond).Should(Equal(0))
+	_, err = r.Reconcile(context.TODO(), req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if !handlerCalled {
+		t.Fatalf("handler not called")
+	}
+	handlerCalled = false
+	err = fakeClient.Create(context.TODO(), &v1beta2.BGPPeer{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "peer2",
+			Namespace: testNamespace,
+		},
+		Spec: v1beta2.BGPPeerSpec{
+			MyASN:      42,
+			ASN:        142,
+			Address:    "1.2.3.4",
+			BFDProfile: "default",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create failed on peer2: %v", err)
+	}
+	_, err = r.Reconcile(context.TODO(), req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if !handlerCalled {
+		t.Fatalf("handler not called")
+	}
 
-	// test update node event with changes into node label.
-	g.Eventually(func() error {
-		err = m.GetClient().Get(ctx, types.NamespacedName{Name: "test-node"}, node)
-		if err != nil {
-			return err
-		}
-		node.Labels = make(map[string]string)
-		node.Labels["test"] = "e2e"
-		node.Labels["test"] = "update"
-		err = m.GetClient().Update(ctx, node)
-		if err != nil {
-			return err
-		}
-		return nil
-	}, 5*time.Second, 200*time.Millisecond).Should(BeNil())
-	g.Eventually(func() int {
-		mutex.Lock()
-		defer mutex.Unlock()
-		return configUpdate
-	}, 5*time.Second, 200*time.Millisecond).Should(Equal(2))
-	g.Eventually(func() int {
-		mutex.Lock()
-		defer mutex.Unlock()
-		return forceReload
-	}, 5*time.Second, 200*time.Millisecond).Should(Equal(0))
+	handlerCalled = false
+	err = fakeClient.Create(context.TODO(), &corev1.Secret{Type: corev1.SecretTypeBasicAuth, ObjectMeta: metav1.ObjectMeta{Name: "foo", Namespace: testNamespace},
+		Data: map[string][]byte{"password": []byte("nopass")}})
+	if err != nil {
+		t.Fatalf("create failed on secret foo: %v", err)
+	}
+	_, err = r.Reconcile(context.TODO(), req)
+	if err != nil {
+		t.Fatalf("reconcile failed: %v", err)
+	}
+	if handlerCalled {
+		t.Fatalf("handler called")
+	}
 }
 
 var (
 	testNamespace                  = "test-controller"
-	scheme                         = runtime.NewScheme()
-	configControllerValidResources = metallbcfg.ClusterResources{
+	configControllerValidResources = config.ClusterResources{
 		Peers: []v1beta2.BGPPeer{
 			{
 				ObjectMeta: metav1.ObjectMeta{
@@ -328,7 +269,7 @@ var (
 		},
 		PasswordSecrets: map[string]corev1.Secret{
 			"bgpsecret": {Type: corev1.SecretTypeBasicAuth, ObjectMeta: metav1.ObjectMeta{Name: "bgpsecret", Namespace: testNamespace},
-				Data: map[string][]byte{"password": []byte([]byte("nopass"))}},
+				Data: map[string][]byte{"password": []byte("nopass")}},
 		},
 		LegacyAddressPools: []v1beta1.AddressPool{
 			{
@@ -361,7 +302,7 @@ var (
 			},
 		},
 	}
-	configControllerInvalidResources = metallbcfg.ClusterResources{
+	configControllerInvalidResources = config.ClusterResources{
 		Peers: []v1beta2.BGPPeer{
 			{
 				ObjectMeta: metav1.ObjectMeta{

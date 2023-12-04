@@ -7,36 +7,59 @@ import (
 	"os"
 	"strings"
 
-	. "github.com/onsi/gomega"
 	"github.com/pkg/errors"
-	"go.universe.tf/metallb/e2etest/pkg/container"
-	"go.universe.tf/metallb/e2etest/pkg/executor"
-	frrconfig "go.universe.tf/metallb/e2etest/pkg/frr/config"
-	frrcontainer "go.universe.tf/metallb/e2etest/pkg/frr/container"
-	"go.universe.tf/metallb/e2etest/pkg/metallb"
+	"go.universe.tf/e2etest/pkg/container"
+	"go.universe.tf/e2etest/pkg/executor"
+	frrconfig "go.universe.tf/e2etest/pkg/frr/config"
+	frrcontainer "go.universe.tf/e2etest/pkg/frr/container"
+	"go.universe.tf/e2etest/pkg/metallb"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
 const (
-	multiHopNetwork      = "multi-hop-net"
-	kindNetwork          = "kind"
-	vrfNetwork           = "vrf-net"
-	vrfName              = "red"
-	metalLBASN           = 64512
-	externalASN          = 4200000000
-	nextHopContainerName = "ebgp-single-hop"
+	kindNetwork         = "kind"
+	vrfNetwork          = "vrf-net"
+	vrfName             = "red"
+	defaultRoutingTable = ""
+	metalLBASN          = 64512
+	metalLBASNVRF       = 64513
+	externalASN         = 4200000000
 )
 
+type nextHopSettings struct {
+	nodeNetwork          string
+	multiHopNetwork      string
+	nodeRoutingTable     string
+	nextHopContainerName string
+}
+
 var (
-	hostIPv4         string
-	hostIPv6         string
-	multiHopRoutes   map[string]container.NetworkSettings
-	FRRContainers    []*frrcontainer.FRR
-	VRFFRRContainers []*frrcontainer.FRR
+	hostIPv4      string
+	hostIPv6      string
+	FRRContainers []*frrcontainer.FRR
+
+	vrfNextHopSettings = nextHopSettings{
+		nodeNetwork:          vrfNetwork,
+		multiHopNetwork:      "vrf-multihop",
+		nodeRoutingTable:     "2",
+		nextHopContainerName: "ebgp-vrf-single-hop",
+	}
+	defaultNextHopSettings = nextHopSettings{
+		nodeNetwork:          kindNetwork,
+		multiHopNetwork:      "kind-multihop",
+		nodeRoutingTable:     defaultRoutingTable,
+		nextHopContainerName: "ebgp-single-hop",
+	}
+)
+
+type HostBGPMode string
+
+const (
+	EBGPMode HostBGPMode = "ebgp"
+	IBGPMode HostBGPMode = "ibgp"
 )
 
 func init() {
-
 	if ip := os.Getenv("PROVISIONING_HOST_EXTERNAL_IPV4"); len(ip) != 0 {
 		hostIPv4 = ip
 	}
@@ -74,7 +97,7 @@ func ExternalContainersSetup(externalContainers string, cs *clientset.Clientset)
 	}
 
 	if containsMultiHop(res) {
-		err = multiHopSetUp(res, cs)
+		err = multiHopSetUp(res, defaultNextHopSettings, cs)
 		if err != nil {
 			return nil, err
 		}
@@ -82,8 +105,8 @@ func ExternalContainersSetup(externalContainers string, cs *clientset.Clientset)
 	return res, nil
 }
 
-func HostContainerSetup() ([]*frrcontainer.FRR, error) {
-	config := hostnetContainerConfig()
+func HostContainerSetup(image string, bgpMode HostBGPMode) ([]*frrcontainer.FRR, error) {
+	config := hostnetContainerConfig(image, bgpMode)
 	res, err := frrcontainer.Create(config)
 	if err != nil {
 		return nil, err
@@ -105,17 +128,14 @@ func HostContainerSetup() ([]*frrcontainer.FRR, error) {
 	See `e2etest/README.md` for more details.
 */
 
-func KindnetContainersSetup(ipv4Addresses, ipv6Addresses []string, cs *clientset.Clientset) ([]*frrcontainer.FRR, error) {
-	Expect(len(ipv4Addresses)).Should(BeNumerically(">=", 2))
-	Expect(len(ipv6Addresses)).Should(BeNumerically(">=", 2))
-
-	configs := frrContainersConfigs(ipv4Addresses, ipv6Addresses)
+func KindnetContainersSetup(cs *clientset.Clientset, image string) ([]*frrcontainer.FRR, error) {
+	configs := frrContainersConfigs(image)
 
 	var out string
-	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "create", multiHopNetwork, "--ipv6",
+	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "create", defaultNextHopSettings.multiHopNetwork, "--ipv6",
 		"--driver=bridge", "--subnet=172.30.0.0/16", "--subnet=fc00:f853:ccd:e798::/64")
 	if err != nil && !strings.Contains(out, "already exists") {
-		return nil, errors.Wrapf(err, "failed to create %s: %s", multiHopNetwork, out)
+		return nil, errors.Wrapf(err, "failed to create %s: %s", defaultNextHopSettings.multiHopNetwork, out)
 	}
 
 	containers, err := frrcontainer.Create(configs)
@@ -123,7 +143,7 @@ func KindnetContainersSetup(ipv4Addresses, ipv6Addresses []string, cs *clientset
 		return nil, err
 	}
 
-	err = multiHopSetUp(containers, cs)
+	err = multiHopSetUp(containers, defaultNextHopSettings, cs)
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +151,7 @@ func KindnetContainersSetup(ipv4Addresses, ipv6Addresses []string, cs *clientset
 }
 
 /*
-	In order to test MetalLB's announcemnet via VRFs, we:
+	In order to test MetalLB's announcement via VRFs, we:
 
 	* create an additional "vrf-net" docker network
 	* for each node, create a vrf named "red" and move the interface in that vrf
@@ -139,39 +159,77 @@ func KindnetContainersSetup(ipv4Addresses, ipv6Addresses []string, cs *clientset
 	* by doing so, the frr container is reacheable only from "inside" the vrf
 */
 
-func VRFContainersSetup(cs *clientset.Clientset) ([]*frrcontainer.FRR, error) {
+func VRFContainersSetup(cs *clientset.Clientset, image string) ([]*frrcontainer.FRR, error) {
 	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "create", vrfNetwork, "--ipv6",
 		"--driver=bridge", "--subnet=172.31.0.0/16", "--subnet=fc00:f853:ccd:e799::/64")
 	if err != nil && !strings.Contains(out, "already exists") {
 		return nil, errors.Wrapf(err, "failed to create %s: %s", vrfNetwork, out)
 	}
 
-	config := vrfContainersConfig()
+	out, err = executor.Host.Exec(executor.ContainerRuntime, "network", "create", vrfNextHopSettings.multiHopNetwork, "--ipv6",
+		"--driver=bridge", "--subnet=172.32.0.0/16", "--subnet=fc00:f853:ccd:e800::/64")
+	if err != nil && !strings.Contains(out, "already exists") {
+		return nil, errors.Wrapf(err, "failed to create %s: %s", vrfNextHopSettings.multiHopNetwork, out)
+	}
+
+	config := vrfContainersConfig(image)
 
 	vrfContainers, err := frrcontainer.Create(config)
 	if err != nil {
 		return nil, err
 	}
+
 	err = vrfSetup(cs)
 	if err != nil {
 		return nil, err
 	}
+	err = multiHopSetUp(vrfContainers, vrfNextHopSettings, cs)
+	if err != nil {
+		return nil, err
+	}
+
 	return vrfContainers, nil
 }
 
 // InfraTearDown tears down the containers and the routes needed for bgp testing.
-func InfraTearDown(cs *clientset.Clientset, containers []*frrcontainer.FRR) error {
-	err := frrcontainer.Delete(containers)
+func InfraTearDown(cs *clientset.Clientset) error {
+	return infraTearDown(cs, FRRContainers, defaultNextHopSettings, func(c *frrcontainer.FRR) bool {
+		return !isVRFContainer(c)
+	})
+}
+
+// InfraTearDown tears down the containers and the routes needed for bgp testing.
+func InfraTearDownVRF(cs *clientset.Clientset) error {
+	return infraTearDown(cs, FRRContainers, vrfNextHopSettings, isVRFContainer)
+}
+
+func infraTearDown(cs *clientset.Clientset, containers []*frrcontainer.FRR, nextHop nextHopSettings, filter func(*frrcontainer.FRR) bool) error {
+	filtered := make([]*frrcontainer.FRR, 0)
+	for _, c := range containers {
+		if filter(c) {
+			filtered = append(filtered, c)
+		}
+	}
+
+	multiHopRoutes := map[string]container.NetworkSettings{}
+	var err error
+	if containsMultiHop(filtered) {
+		multiHopRoutes, err = container.Networks(nextHop.nextHopContainerName)
+		if err != nil {
+			return err
+		}
+	}
+
+	err = frrcontainer.Delete(filtered)
 	if err != nil {
 		return err
 	}
 
-	err = multiHopTearDown(cs)
-	if err != nil {
-		return err
+	if len(multiHopRoutes) == 0 {
+		return nil
 	}
 
-	err = vrfTeardown(cs)
+	err = multiHopTearDown(nextHop, multiHopRoutes, cs)
 	if err != nil {
 		return err
 	}
@@ -179,30 +237,33 @@ func InfraTearDown(cs *clientset.Clientset, containers []*frrcontainer.FRR) erro
 	return nil
 }
 
-// multiHopSetUp connects the ebgp-single-hop container to the multi-hop-net network,
-// and creates the required static routes between the multi-hop containers and the speaker pods.
-func multiHopSetUp(containers []*frrcontainer.FRR, cs *clientset.Clientset) error {
-	err := addContainerToNetwork(nextHopContainerName, multiHopNetwork)
+// multiHopSetUp prepares a multihop scenario taking nextHop settings, which include:
+// - a container that acts as next hop.
+// - the docker network the nodes are connected to (and expected to perform the next hop peering).
+// - an additional docker network connected both do the "next hop" container and to the remote container, acting as last hop.
+// - an optional routing table to inject the routes to, useful in case the interface belongs to a vrf.
+func multiHopSetUp(containers []*frrcontainer.FRR, nextHop nextHopSettings, cs *clientset.Clientset) error {
+	err := addContainerToNetwork(nextHop.nextHopContainerName, nextHop.multiHopNetwork)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to connect %s to %s", nextHopContainerName, multiHopNetwork)
+		return errors.Wrapf(err, "failed to connect %s to %s", nextHop.nextHopContainerName, nextHop.multiHopNetwork)
 	}
 
-	multiHopRoutes, err = container.Networks(nextHopContainerName)
+	multiHopRoutes, err := container.Networks(nextHop.nextHopContainerName)
 	if err != nil {
 		return err
 	}
 
 	for _, c := range containers {
-		if c.Network == multiHopNetwork {
-			err = container.AddMultiHop(c, c.Network, kindNetwork, multiHopRoutes)
+		if c.Network == nextHop.multiHopNetwork {
+			err = container.AddMultiHop(c, c.Network, nextHop.nodeNetwork, defaultRoutingTable, multiHopRoutes)
 			if err != nil {
-				return errors.Wrapf(err, "Failed to set up the multi-hop network for container %s", c.Name)
+				return errors.Wrapf(err, "failed to set up the multi-hop network for container %s", c.Name)
 			}
 		}
 	}
-	err = addMultiHopToNodes(cs)
+	err = addMultiHopToNodes(cs, nextHop.nodeNetwork, nextHop.multiHopNetwork, nextHop.nodeRoutingTable, multiHopRoutes)
 	if err != nil {
-		return errors.Wrapf(err, "Failed to set up the multi-hop network")
+		return errors.Wrapf(err, "failed to set up the multi-hop network")
 	}
 
 	return nil
@@ -216,10 +277,10 @@ func vrfSetup(cs *clientset.Clientset) error {
 	for _, pod := range speakerPods {
 		err := addContainerToNetwork(pod.Spec.NodeName, vrfNetwork)
 		if err != nil {
-			return errors.Wrapf(err, "Failed to connect %s to %s", pod.Spec.NodeName, vrfNetwork)
+			return errors.Wrapf(err, "failed to connect %s to %s", pod.Spec.NodeName, vrfNetwork)
 		}
 
-		err = container.SetupVRFForNetwork(pod.Spec.NodeName, vrfNetwork, vrfName)
+		err = container.SetupVRFForNetwork(pod.Spec.NodeName, vrfNetwork, vrfName, vrfNextHopSettings.nodeRoutingTable)
 		if err != nil {
 			return err
 		}
@@ -282,10 +343,56 @@ func externalContainersConfigs() map[string]frrcontainer.Config {
 	return res
 }
 
-func hostnetContainerConfig() map[string]frrcontainer.Config {
+func hostnetContainerConfig(image string, bgpMode HostBGPMode) map[string]frrcontainer.Config {
+	switch bgpMode {
+	case IBGPMode:
+		return map[string]frrcontainer.Config{
+			"ibgp-single-hop": {
+				Name:  "ibgp-single-hop",
+				Image: image,
+				Neighbor: frrconfig.NeighborConfig{
+					ASN:      metalLBASN,
+					Password: "ibgp-test",
+					MultiHop: false,
+				},
+				Router: frrconfig.RouterConfig{
+					ASN:      metalLBASN,
+					BGPPort:  179,
+					Password: "ibgp-test",
+				},
+				Network:  "host",
+				HostIPv4: hostIPv4,
+				HostIPv6: hostIPv6,
+			},
+		}
+	case EBGPMode:
+		return map[string]frrcontainer.Config{
+			"ebgp-single-hop": {
+				Name:  "ebgp-single-hop",
+				Image: image,
+				Neighbor: frrconfig.NeighborConfig{
+					ASN:      metalLBASN,
+					MultiHop: false,
+				},
+				Router: frrconfig.RouterConfig{
+					ASN:     externalASN,
+					BGPPort: 179,
+				},
+				Network:  "host",
+				HostIPv4: hostIPv4,
+				HostIPv6: hostIPv6,
+			},
+		}
+	default:
+		return nil
+	}
+}
+
+func frrContainersConfigs(image string) map[string]frrcontainer.Config {
 	res := make(map[string]frrcontainer.Config)
 	res["ibgp-single-hop"] = frrcontainer.Config{
-		Name: "ibgp-single-hop",
+		Name:  "ibgp-single-hop",
+		Image: image,
 		Neighbor: frrconfig.NeighborConfig{
 			ASN:      metalLBASN,
 			Password: "ibgp-test",
@@ -296,35 +403,13 @@ func hostnetContainerConfig() map[string]frrcontainer.Config {
 			BGPPort:  179,
 			Password: "ibgp-test",
 		},
-		Network:  "host",
+		Network:  kindNetwork,
 		HostIPv4: hostIPv4,
 		HostIPv6: hostIPv6,
 	}
-	return res
-}
-
-func frrContainersConfigs(ipv4Addresses, ipv6Addresses []string) map[string]frrcontainer.Config {
-	res := make(map[string]frrcontainer.Config)
-	res["ibgp-single-hop"] = frrcontainer.Config{
-		Name: "ibgp-single-hop",
-		Neighbor: frrconfig.NeighborConfig{
-			ASN:      metalLBASN,
-			Password: "ibgp-test",
-			MultiHop: false,
-		},
-		Router: frrconfig.RouterConfig{
-			ASN:      metalLBASN,
-			BGPPort:  179,
-			Password: "ibgp-test",
-		},
-		Network:     kindNetwork,
-		HostIPv4:    hostIPv4,
-		HostIPv6:    hostIPv6,
-		IPv4Address: ipv4Addresses[0],
-		IPv6Address: ipv6Addresses[0],
-	}
 	res["ibgp-multi-hop"] = frrcontainer.Config{
-		Name: "ibgp-multi-hop",
+		Name:  "ibgp-multi-hop",
+		Image: image,
 		Neighbor: frrconfig.NeighborConfig{
 			ASN:      metalLBASN,
 			Password: "ibgp-test",
@@ -335,12 +420,13 @@ func frrContainersConfigs(ipv4Addresses, ipv6Addresses []string) map[string]frrc
 			BGPPort:  180,
 			Password: "ibgp-test",
 		},
-		Network:  multiHopNetwork,
+		Network:  defaultNextHopSettings.multiHopNetwork,
 		HostIPv4: hostIPv4,
 		HostIPv6: hostIPv6,
 	}
 	res["ebgp-multi-hop"] = frrcontainer.Config{
-		Name: "ebgp-multi-hop",
+		Name:  "ebgp-multi-hop",
+		Image: image,
 		Neighbor: frrconfig.NeighborConfig{
 			ASN:      metalLBASN,
 			Password: "ebgp-test",
@@ -351,12 +437,13 @@ func frrContainersConfigs(ipv4Addresses, ipv6Addresses []string) map[string]frrc
 			BGPPort:  180,
 			Password: "ebgp-test",
 		},
-		Network:  multiHopNetwork,
+		Network:  defaultNextHopSettings.multiHopNetwork,
 		HostIPv4: hostIPv4,
 		HostIPv6: hostIPv6,
 	}
 	res["ebgp-single-hop"] = frrcontainer.Config{
 		Name:    "ebgp-single-hop",
+		Image:   image,
 		Network: kindNetwork,
 		Neighbor: frrconfig.NeighborConfig{
 			ASN:      metalLBASN,
@@ -366,98 +453,103 @@ func frrContainersConfigs(ipv4Addresses, ipv6Addresses []string) map[string]frrc
 			ASN:     externalASN,
 			BGPPort: 179,
 		},
-		IPv4Address: ipv4Addresses[0],
-		IPv6Address: ipv6Addresses[0],
 	}
 	return res
 }
 
-func vrfContainersConfig() map[string]frrcontainer.Config {
+func vrfContainersConfig(image string) map[string]frrcontainer.Config {
 	res := make(map[string]frrcontainer.Config)
 	res["ebgp-vrf-single-hop"] = frrcontainer.Config{
 		Name:    "ebgp-vrf-single-hop",
+		Image:   image,
 		Network: vrfNetwork,
 		Neighbor: frrconfig.NeighborConfig{
-			ASN:      metalLBASN,
+			ASN:      metalLBASNVRF,
+			Password: "vrf-test",
 			MultiHop: false,
 		},
 		Router: frrconfig.RouterConfig{
-			ASN:     externalASN,
-			BGPPort: 179,
-			VRF:     vrfName,
+			ASN:      externalASN,
+			Password: "vrf-test",
+			BGPPort:  179,
+			VRF:      vrfName,
 		},
 	}
 	res["ibgp-vrf-single-hop"] = frrcontainer.Config{
 		Name:    "ibgp-vrf-single-hop",
+		Image:   image,
 		Network: vrfNetwork,
 		Neighbor: frrconfig.NeighborConfig{
-			ASN:      metalLBASN,
+			ASN:      metalLBASNVRF,
+			Password: "vrf-test",
 			MultiHop: false,
 		},
 		Router: frrconfig.RouterConfig{
-			ASN:     metalLBASN,
-			BGPPort: 179,
-			VRF:     vrfName,
+			ASN:      metalLBASNVRF,
+			BGPPort:  179,
+			Password: "vrf-test",
+			VRF:      vrfName,
 		},
+	}
+	res["ibgp-vrf-multi-hop"] = frrcontainer.Config{
+		Name:  "ibgp-vrf-multi-hop",
+		Image: image,
+		Neighbor: frrconfig.NeighborConfig{
+			ASN:      metalLBASNVRF,
+			Password: "ibgp-test",
+			MultiHop: true,
+		},
+		Router: frrconfig.RouterConfig{
+			ASN:      metalLBASNVRF,
+			BGPPort:  180,
+			Password: "ibgp-test",
+			VRF:      vrfName,
+		},
+		Network: vrfNextHopSettings.multiHopNetwork,
+	}
+	res["ebgp-vrf-multi-hop"] = frrcontainer.Config{
+		Name:  "ebgp-vrf-multi-hop",
+		Image: image,
+		Neighbor: frrconfig.NeighborConfig{
+			ASN:      metalLBASNVRF,
+			Password: "ebgp-test",
+			MultiHop: true,
+		},
+		Router: frrconfig.RouterConfig{
+			ASN:      externalASN,
+			BGPPort:  180,
+			Password: "ebgp-test",
+			VRF:      vrfName,
+		},
+		Network: vrfNextHopSettings.multiHopNetwork,
 	}
 
 	return res
 }
 
-func multiHopTearDown(cs *clientset.Clientset) error {
-	_, err := executor.Host.Exec(executor.ContainerRuntime, "network", "inspect", multiHopNetwork)
+func multiHopTearDown(nextHop nextHopSettings, routes map[string]container.NetworkSettings, cs *clientset.Clientset) error {
+	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "rm", nextHop.multiHopNetwork)
 	if err != nil {
-		// do nothing if the multi-hop network doesn't exist.
-		return nil
+		return errors.Wrapf(err, "failed to remove %s: %s", nextHop.multiHopNetwork, out)
 	}
 
-	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "rm", multiHopNetwork)
-	if err != nil {
-		return errors.Wrapf(err, "Failed to remove %s: %s", multiHopNetwork, out)
-	}
 	speakerPods, err := metallb.SpeakerPods(cs)
 	if err != nil {
 		return err
 	}
 	for _, pod := range speakerPods {
 		nodeExec := executor.ForContainer(pod.Spec.NodeName)
-		err = container.DeleteMultiHop(nodeExec, kindNetwork, multiHopNetwork, multiHopRoutes)
+		err = container.DeleteMultiHop(nodeExec, nextHop.nodeNetwork, nextHop.multiHopNetwork, nextHop.nodeRoutingTable, routes)
 		if err != nil {
-			return errors.Wrapf(err, "Failed to delete multihop routes for pod %s", pod.ObjectMeta.Name)
-		}
-
-	}
-
-	return nil
-}
-
-func vrfTeardown(cs *clientset.Clientset) error {
-	_, err := executor.Host.Exec(executor.ContainerRuntime, "network", "inspect", vrfNetwork)
-	if err != nil {
-		return nil
-	}
-
-	speakerPods, err := metallb.SpeakerPods(cs)
-	if err != nil {
-		return err
-	}
-
-	for _, pod := range speakerPods {
-		err := removeContainerFromNetwork(pod.Spec.NodeName, vrfNetwork)
-		if err != nil {
-			return err
+			return errors.Wrapf(err, "failed to delete multihop routes for pod %s", pod.ObjectMeta.Name)
 		}
 	}
 
-	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "rm", vrfNetwork)
-	if err != nil {
-		return errors.Wrapf(err, "Failed to remove %s: %s", multiHopNetwork, out)
-	}
 	return nil
 }
 
 // Allow the speaker nodes to reach the multi-hop network containers.
-func addMultiHopToNodes(cs *clientset.Clientset) error {
+func addMultiHopToNodes(cs *clientset.Clientset, targetNetwork, multiHopNetwork string, routingtable string, multiHopRoutes map[string]container.NetworkSettings) error {
 	/*
 		When "host" network is not specified we assume that the tests
 		run on a kind cluster, where all the nodes are actually containers
@@ -470,7 +562,7 @@ func addMultiHopToNodes(cs *clientset.Clientset) error {
 	}
 	for _, pod := range speakerPods {
 		nodeExec := executor.ForContainer(pod.Spec.NodeName)
-		err := container.AddMultiHop(nodeExec, kindNetwork, multiHopNetwork, multiHopRoutes)
+		err := container.AddMultiHop(nodeExec, targetNetwork, multiHopNetwork, routingtable, multiHopRoutes)
 		if err != nil {
 			return err
 		}
@@ -482,7 +574,7 @@ func addMultiHopToNodes(cs *clientset.Clientset) error {
 // The valid names are: ibgp-single-hop / ibgp-multi-hop / ebgp-single-hop / ebgp-multi-hop.
 func validateContainersNames(containerNames string) error {
 	if len(containerNames) == 0 {
-		return fmt.Errorf("Failed to validate containers names: got empty string")
+		return fmt.Errorf("failed to validate containers names: got empty string")
 	}
 	validNames := map[string]bool{
 		"ibgp-single-hop": true,
@@ -494,10 +586,10 @@ func validateContainersNames(containerNames string) error {
 	for _, n := range names {
 		v, ok := validNames[n]
 		if !ok {
-			return fmt.Errorf("Failed to validate container name: %s invalid name", n)
+			return fmt.Errorf("failed to validate container name: %s invalid name", n)
 		}
 		if !v {
-			return fmt.Errorf("Failed to validate container name: %s duplicate name", n)
+			return fmt.Errorf("failed to validate container name: %s duplicate name", n)
 		}
 		validNames[n] = false
 	}
@@ -532,24 +624,11 @@ func addContainerToNetwork(containerName, network string) error {
 		return nil
 	}
 	if err != nil {
-		return errors.Wrapf(err, "Failed to connect %s to %s: %s", containerName, network, out)
+		return errors.Wrapf(err, "failed to connect %s to %s: %s", containerName, network, out)
 	}
 	return nil
 }
 
-func removeContainerFromNetwork(containerName, network string) error {
-	networks, err := container.Networks(containerName)
-	if err != nil {
-		return err
-	}
-	if _, ok := networks[network]; !ok {
-		return nil
-	}
-
-	out, err := executor.Host.Exec(executor.ContainerRuntime, "network", "disconnect",
-		network, containerName)
-	if err != nil {
-		return errors.Wrapf(err, "Failed to disconnect %s from %s: %s", containerName, network, out)
-	}
-	return nil
+func isVRFContainer(c *frrcontainer.FRR) bool {
+	return strings.Contains(c.Name, "vrf")
 }

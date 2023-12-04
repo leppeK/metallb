@@ -11,9 +11,9 @@ import (
 	"text/template"
 
 	"github.com/pkg/errors"
-	consts "go.universe.tf/metallb/e2etest/pkg/frr/consts"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/internal/ipfamily"
+	consts "go.universe.tf/e2etest/pkg/frr/consts"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 )
@@ -61,8 +61,8 @@ router bgp {{$ROUTERASN}}
 {{range .AcceptV4Neighbors }}
     neighbor {{.Addr}} next-hop-self
     neighbor {{.Addr}} activate
-    {{- if .ToAdvertise}}
-    network {{.ToAdvertise}}
+    {{range .ToAdvertiseV4 }}
+    network {{.}}
     {{- end }}
 {{- end }}
   exit-address-family
@@ -73,8 +73,8 @@ router bgp {{$ROUTERASN}}
     neighbor {{.Addr}} next-hop-self
     neighbor {{.Addr}} activate
     neighbor {{.Addr}} route-map RMAP in
-    {{- if .ToAdvertise}}
-    network {{.ToAdvertise}}
+    {{range .ToAdvertiseV6 }}
+    network {{.}}
     {{- end }}
 {{- end }}
 exit-address-family
@@ -94,12 +94,13 @@ type RouterConfig struct {
 }
 
 type NeighborConfig struct {
-	ASN         uint32
-	Addr        string
-	Password    string
-	BFDEnabled  bool
-	ToAdvertise string
-	MultiHop    bool
+	ASN           uint32
+	Addr          string
+	Password      string
+	BFDEnabled    bool
+	ToAdvertiseV4 []string
+	ToAdvertiseV6 []string
+	MultiHop      bool
 }
 
 type MultiProtocol bool

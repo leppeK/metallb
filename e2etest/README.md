@@ -24,6 +24,11 @@ Run only L2 test suite:
 inv e2etest --focus L2
 ```
 
+Run with additional ginkgo parameters for example:
+```
+inv e2etest --ginkgo-params="--until-it-fails -v"
+```
+
 The test suite will run the appropriate tests against the cluster.
 Be sure to cleanup any previously created development clusters using `inv dev-env-cleanup`.
 
@@ -31,7 +36,8 @@ Be sure to cleanup any previously created development clusters using `inv dev-en
 ## BGP tests network topology
 
 In order to test the multiple scenarios required for BGP, three different containers are required.
-The following diagram describes the networks, the pods and the containers involved.
+The following diagram describes the network connectivity using the regular kind network, the pods
+and the containers involved.
 
 ```
   ┌────────────────────────────────────────────┐
@@ -61,6 +67,37 @@ The following diagram describes the networks, the pods and the containers involv
                        │  fc00:f853:ccd:e798::/64                         │
                        └──────────────────────────────────────────────────┘
 ```
+
+The same layout is replicated to validate external routers reacheable via a VRF.
+
+So, on top of what's described above, there is another set of 4 containers meant
+to be reached using an interface hosted inside a vrf created on the node:
+
+```none
+                                                                                           ┌─────────────────────┐
+                                                                                           │                     │
+                                                                                           │                     │
+                                                                                        ┌──┤  ibgp-vrf-multi-hop │
+                                           ┌──────────────────────┐                     │  │                     │
+                                           │                      │                     │  │                     │
+                                           │                      │                     │  └─────────────────────┘
+┌───────────────────────┐               ┌──┤  ebgp-vrf-single-hop ├─────────────────────┤
+│                       │               │  │                      │                     │  ┌─────────────────────┐
+│                       │               │  │                      │   vrf-multihop-net  │  │                     │
+│   ┌─────────┐         │               │  └──────────────────────┘                     │  │                     │
+│   │         │  ┌──────┤               │                                               └──┤  ebgp-vrf-multi-hop │
+│   │ Speaker │  │      │               │                                                  │                     │
+│   │         │  │   ───┼───────────────┤                                                  │                     │
+│   └─────────┘  │   VRF│  vrf-net      │  ┌──────────────────────┐                        └─────────────────────┘
+│                │      │               │  │                      │
+│                └──────┤               │  │                      │
+│                       │               └──┤  ibgp-vrf-single-hop │
+│                  Node │                  │                      │
+│                       │                  │                      │
+└───────────────────────┘                  └──────────────────────┘
+
+```
+
 
 The above diagram is implemented in `infra_setup.go`.
 

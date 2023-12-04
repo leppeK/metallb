@@ -16,7 +16,7 @@ import (
 
 var logger = log.NewNopLogger()
 
-func NewController(l2Handler *MockProtocol, bgpHandler *MockProtocol, t *testing.T) *controller {
+func mockNewController(l2Handler *MockProtocol, bgpHandler *MockProtocol, t *testing.T) *controller {
 	ret := &controller{
 		myNode:  "nodeName",
 		bgpType: "frr",
@@ -44,7 +44,7 @@ func TestLoadBalancerCreation(t *testing.T) {
 		protocol:       config.BGP,
 		shouldAnnounce: true,
 	}
-	c := NewController(l2MockHandler, bgpMockHandler, t)
+	c := mockNewController(l2MockHandler, bgpMockHandler, t)
 
 	svc := &v1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -58,11 +58,11 @@ func TestLoadBalancerCreation(t *testing.T) {
 	}
 
 	cfg := &config.Config{
-		Pools: map[string]*config.Pool{
+		Pools: &config.Pools{ByName: map[string]*config.Pool{
 			"default": {
 				CIDR: []*net.IPNet{ipnet("10.20.30.0/24")},
 			},
-		},
+		}},
 	}
 
 	state := c.SetConfig(logger, cfg)
@@ -172,7 +172,7 @@ func (m *MockProtocol) SetConfig(l log.Logger, c *config.Config) error {
 	return nil
 }
 
-func (m *MockProtocol) ShouldAnnounce(_ log.Logger, _ string, _ []net.IP, _ *config.Pool, _ *v1.Service, _ epslices.EpsOrSlices) string {
+func (m *MockProtocol) ShouldAnnounce(_ log.Logger, _ string, _ []net.IP, _ *config.Pool, _ *v1.Service, _ epslices.EpsOrSlices, _ map[string]*v1.Node) string {
 	if m.shouldAnnounce {
 		return ""
 	}
@@ -192,6 +192,8 @@ func (m *MockProtocol) DeleteBalancer(_ log.Logger, _ string, _ string) error {
 func (m *MockProtocol) SetNode(_ log.Logger, _ *v1.Node) error {
 	panic("not implemented") // TODO: Implement
 }
+
+func (m *MockProtocol) SetEventCallback(_ func(interface{})) {}
 
 func (m *MockProtocol) reset() {
 	m.deleteBalancerCalled = false

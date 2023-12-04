@@ -3,14 +3,15 @@
 package l2tests
 
 import (
+	"context"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"go.universe.tf/e2etest/pkg/config"
+	"go.universe.tf/e2etest/pkg/k8s"
+	"go.universe.tf/e2etest/pkg/service"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/e2etest/pkg/service"
-	internalconfig "go.universe.tf/metallb/internal/config"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
@@ -24,8 +25,8 @@ var _ = ginkgo.Describe("LoadBalancer class", func() {
 
 	var f *framework.Framework
 	ginkgo.AfterEach(func() {
-		if ginkgo.CurrentGinkgoTestDescription().Failed {
-			k8s.DumpInfo(Reporter, ginkgo.CurrentGinkgoTestDescription().TestText)
+		if ginkgo.CurrentSpecReport().Failed() {
+			k8s.DumpInfo(Reporter, ginkgo.CurrentSpecReport().LeafNodeText)
 		}
 
 		// Clean previous configuration.
@@ -46,7 +47,7 @@ var _ = ginkgo.Describe("LoadBalancer class", func() {
 
 	ginkgo.Context("A service with loadbalancer class", func() {
 		ginkgo.It("should not get an ip", func() {
-			resources := internalconfig.ClusterResources{
+			resources := config.Resources{
 				Pools: []metallbv1beta1.IPAddressPool{
 					{
 						ObjectMeta: metav1.ObjectMeta{
@@ -71,7 +72,7 @@ var _ = ginkgo.Describe("LoadBalancer class", func() {
 			framework.ExpectNoError(err)
 
 			jig := e2eservice.NewTestJig(cs, f.Namespace.Name, "lbclass")
-			svc, err := jig.CreateLoadBalancerService(10*time.Second, service.WithLoadbalancerClass("foo"))
+			svc, err := jig.CreateLoadBalancerService(context.TODO(), 10*time.Second, service.WithLoadbalancerClass("foo"))
 			gomega.Expect(err).Should(gomega.MatchError(gomega.ContainSubstring("timed out waiting for the condition")))
 			gomega.Expect(svc).To(gomega.BeNil())
 		})

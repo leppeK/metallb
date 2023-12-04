@@ -26,13 +26,16 @@ const (
 
 const SlicesServiceIndexName = "ServiceName"
 
-// IsConditionReady tells if the conditions represent a ready state, interpreting
-// nil ready as ready.
-func IsConditionReady(conditions discovery.EndpointConditions) bool {
-	if conditions.Ready == nil {
-		return true
+// IsConditionServing tells if the conditions represent a serving state, deferring
+// to ready state if serving == nil.
+func IsConditionServing(conditions discovery.EndpointConditions) bool {
+	if conditions.Serving == nil {
+		if conditions.Ready == nil {
+			return true
+		}
+		return *conditions.Ready
 	}
-	return *conditions.Ready
+	return *conditions.Serving
 }
 
 func ServiceKeyForSlice(endpointSlice *discovery.EndpointSlice) (types.NamespacedName, error) {
@@ -50,13 +53,13 @@ func ServiceKeyForSlice(endpointSlice *discovery.EndpointSlice) (types.Namespace
 func SlicesServiceIndex(obj interface{}) ([]string, error) {
 	endpointSlice, ok := obj.(*discovery.EndpointSlice)
 	if !ok {
-		return nil, fmt.Errorf("Passed object is not a slice")
+		return nil, fmt.Errorf("passed object is not a slice")
 	}
 	serviceKey, err := ServiceKeyForSlice(endpointSlice)
 	if err != nil {
 		return nil, err
 	}
-	return []string{string(serviceKey.String())}, nil
+	return []string{serviceKey.String()}, nil
 }
 
 func serviceNameForSlice(endpointSlice *discovery.EndpointSlice) (string, error) {

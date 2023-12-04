@@ -5,6 +5,7 @@ package k8s // import "go.universe.tf/metallb/internal/k8s"
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -17,6 +18,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
+	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	metallbv1alpha1 "go.universe.tf/metallb/api/v1alpha1"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
@@ -29,22 +32,21 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
+	frrv1beta1 "github.com/metallb/frr-k8s/api/v1beta1"
 	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	v1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
+	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
-	policyv1beta1 "k8s.io/kubernetes/pkg/apis/policy/v1beta1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apiext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	rbacv1 "k8s.io/kubernetes/pkg/apis/rbac/v1"
-
 	"k8s.io/apimachinery/pkg/runtime"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -62,7 +64,6 @@ var (
 	validatingWebhookName           = "metallb-webhook-configuration"
 	addresspoolConvertingWebhookCRD = "addresspools.metallb.io"
 	bgppeerConvertingWebhookCRD     = "bgppeers.metallb.io"
-	webhookSecretName               = "webhook-server-cert" //#nosec G101
 )
 
 func init() {
@@ -78,6 +79,7 @@ func init() {
 	utilruntime.Must(rbacv1.AddToScheme(scheme))
 	utilruntime.Must(apiext.AddToScheme(scheme))
 	utilruntime.Must(discovery.AddToScheme(scheme))
+	utilruntime.Must(frrv1beta1.AddToScheme(scheme))
 
 	// +kubebuilder:scaffold:scheme
 }
@@ -87,11 +89,12 @@ func init() {
 type Client struct {
 	logger log.Logger
 
-	client         *kubernetes.Clientset
-	events         record.EventRecorder
-	mgr            manager.Manager
-	validateConfig config.Validate
-	ForceSync      func()
+	client           *kubernetes.Clientset
+	events           record.EventRecorder
+	mgr              manager.Manager
+	validateConfig   config.Validate
+	ForceSync        func()
+	BGPEventCallback func(interface{})
 }
 
 // Config specifies the configuration of the Kubernetes
@@ -108,10 +111,15 @@ type Config struct {
 	Namespace           string
 	ValidateConfig      config.Validate
 	EnableWebhook       bool
+	WebHookMinVersion   uint16
+	WebHookCipherSuites []uint16
 	DisableCertRotation bool
+	WebhookSecretName   string
 	CertDir             string
 	CertServiceName     string
 	LoadBalancerClass   string
+	WebhookWithHTTP2    bool
+	WithFRRK8s          bool
 	Listener
 }
 
@@ -119,31 +127,37 @@ type Config struct {
 //
 // The client uses processName to identify itself to the cluster
 // (e.g. when logging events).
-//
-//nolint:godot
 func New(cfg *Config) (*Client, error) {
-	namespaceSelector := cache.ObjectSelector{
+	namespaceSelector := cache.ByObject{
 		Field: fields.ParseSelectorOrDie(fmt.Sprintf("metadata.namespace=%s", cfg.Namespace)),
 	}
 
+	objectsPerNamespace := map[client.Object]cache.ByObject{
+		&metallbv1beta1.AddressPool{}:      namespaceSelector,
+		&metallbv1beta1.BFDProfile{}:       namespaceSelector,
+		&metallbv1beta1.BGPAdvertisement{}: namespaceSelector,
+		&metallbv1beta1.BGPPeer{}:          namespaceSelector,
+		&metallbv1beta1.IPAddressPool{}:    namespaceSelector,
+		&metallbv1beta1.L2Advertisement{}:  namespaceSelector,
+		&metallbv1beta2.BGPPeer{}:          namespaceSelector,
+		&metallbv1beta1.Community{}:        namespaceSelector,
+		&corev1.Secret{}:                   namespaceSelector,
+		&corev1.ConfigMap{}:                namespaceSelector,
+	}
+	if cfg.WithFRRK8s {
+		objectsPerNamespace[&frrv1beta1.FRRConfiguration{}] = namespaceSelector
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:             scheme,
-		Port:               9443, // TODO port only with controller, for webhooks
-		LeaderElection:     false,
-		MetricsBindAddress: "0", // Disable metrics endpoint of controller manager
-		NewCache: cache.BuilderWithOptions(cache.Options{
-			SelectorsByObject: map[client.Object]cache.ObjectSelector{
-				&metallbv1beta1.AddressPool{}:      namespaceSelector,
-				&metallbv1beta1.BFDProfile{}:       namespaceSelector,
-				&metallbv1beta1.BGPAdvertisement{}: namespaceSelector,
-				&metallbv1beta1.BGPPeer{}:          namespaceSelector,
-				&metallbv1beta1.IPAddressPool{}:    namespaceSelector,
-				&metallbv1beta1.L2Advertisement{}:  namespaceSelector,
-				&metallbv1beta2.BGPPeer{}:          namespaceSelector,
-				&metallbv1beta1.Community{}:        namespaceSelector,
-				&corev1.Secret{}:                   namespaceSelector,
-			},
-		}),
+		Scheme:         scheme,
+		LeaderElection: false,
+		Cache: cache.Options{
+			ByObject: objectsPerNamespace,
+		},
+		WebhookServer: webhookServer(cfg),
+		Metrics: metricsserver.Options{
+			BindAddress: "0", // Disable metrics endpoint of controller manager
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "unable to start manager")
@@ -202,15 +216,31 @@ func New(cfg *Config) (*Client, error) {
 
 	if cfg.NodeChanged != nil {
 		if err = (&controllers.NodeReconciler{
-			Client:   mgr.GetClient(),
-			Logger:   cfg.Logger,
-			Scheme:   mgr.GetScheme(),
-			Handler:  cfg.NodeHandler,
-			NodeName: cfg.NodeName,
+			Client:      mgr.GetClient(),
+			Logger:      cfg.Logger,
+			Scheme:      mgr.GetScheme(),
+			Handler:     cfg.NodeHandler,
+			NodeName:    cfg.NodeName,
+			ForceReload: reload,
 		}).SetupWithManager(mgr); err != nil {
 			level.Error(c.logger).Log("error", err, "unable to create controller", "node")
 			return nil, errors.Wrap(err, "failed to create node reconciler")
 		}
+	}
+
+	if cfg.WithFRRK8s {
+		frrk8sController := controllers.FRRK8sReconciler{
+			Client:    mgr.GetClient(),
+			Logger:    cfg.Logger,
+			Scheme:    mgr.GetScheme(),
+			Namespace: cfg.Namespace,
+			NodeName:  cfg.NodeName,
+		}
+		if err := frrk8sController.SetupWithManager(mgr); err != nil {
+			level.Error(c.logger).Log("error", err, "unable to create controller", "frrk8s")
+			return nil, errors.Wrap(err, "failed to create frrk8s reconciler")
+		}
+		c.BGPEventCallback = frrk8sController.UpdateConfig
 	}
 
 	// use DisableEpSlices to skip the autodiscovery mechanism. Useful if EndpointSlices are enabled in the cluster but disabled in kube-proxy
@@ -347,7 +377,7 @@ func (c *Client) CreateMlSecret(namespace, controllerDeploymentName, secretName 
 	// Create the K8S Secret object.
 	_, err = c.client.CoreV1().Secrets(namespace).Create(
 		context.TODO(),
-		&v1.Secret{
+		&corev1.Secret{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: secretName,
 				OwnerReferences: []metav1.OwnerReference{{
@@ -396,19 +426,19 @@ func (c *Client) Run(stopCh <-chan struct{}) error {
 
 // UpdateStatus writes the protected "status" field of svc back into
 // the Kubernetes cluster.
-func (c *Client) UpdateStatus(svc *v1.Service) error {
+func (c *Client) UpdateStatus(svc *corev1.Service) error {
 	_, err := c.client.CoreV1().Services(svc.Namespace).UpdateStatus(context.TODO(), svc, metav1.UpdateOptions{})
 	return err
 }
 
 // Infof logs an informational event about svc to the Kubernetes cluster.
-func (c *Client) Infof(svc *v1.Service, kind, msg string, args ...interface{}) {
-	c.events.Eventf(svc, v1.EventTypeNormal, kind, msg, args...)
+func (c *Client) Infof(svc *corev1.Service, kind, msg string, args ...interface{}) {
+	c.events.Eventf(svc, corev1.EventTypeNormal, kind, msg, args...)
 }
 
 // Errorf logs an error event about svc to the Kubernetes cluster.
-func (c *Client) Errorf(svc *v1.Service, kind, msg string, args ...interface{}) {
-	c.events.Eventf(svc, v1.EventTypeWarning, kind, msg, args...)
+func (c *Client) Errorf(svc *corev1.Service, kind, msg string, args ...interface{}) {
+	c.events.Eventf(svc, corev1.EventTypeWarning, kind, msg, args...)
 }
 
 // UseEndpointSlices detect if Endpoints Slices are enabled in the cluster.
@@ -421,4 +451,26 @@ func UseEndpointSlices(kubeClient kubernetes.Interface) bool {
 		return false
 	}
 	return true
+}
+
+func webhookServer(cfg *Config) webhook.Server {
+	disableHTTP2 := func(c *tls.Config) {
+		if cfg.WebhookWithHTTP2 {
+			return
+		}
+		c.NextProtos = []string{"http/1.1"}
+	}
+
+	tlsSecurity := func(tlsConfig *tls.Config) {
+		tlsConfig.MinVersion = cfg.WebHookMinVersion
+		tlsConfig.CipherSuites = cfg.WebHookCipherSuites
+	}
+
+	webhookServerOptions := webhook.Options{
+		TLSOpts: []func(config *tls.Config){disableHTTP2, tlsSecurity},
+		Port:    9443,
+	}
+
+	res := webhook.NewServer(webhookServerOptions)
+	return res
 }

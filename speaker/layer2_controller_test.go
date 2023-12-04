@@ -151,6 +151,11 @@ func TestUsableNodes(t *testing.T) {
 }
 
 func TestUsableNodesEPSlices(t *testing.T) {
+	b := &fakeBGP{
+		t: t,
+	}
+	newBGP = b.NewSessionManager
+
 	c, err := newController(controllerConfig{
 		MyNode: "iris1",
 		Logger: log.NewLogfmtLogger(log.NewSyncWriter(os.Stderr)),
@@ -302,6 +307,40 @@ func TestUsableNodesEPSlices(t *testing.T) {
 			usableSpeakers:  map[string]bool{"iris1": true, "iris2": true},
 			cExpectedResult: []string{"iris1"},
 		},
+		{
+			desc: "Two endpoints, different hosts, not ready but serving",
+			eps: epslices.EpsOrSlices{
+				SlicesVal: []discovery.EndpointSlice{
+					{
+						Endpoints: []discovery.Endpoint{
+							{
+								Addresses: []string{
+									"2.3.4.5",
+								},
+								NodeName: stringPtr("iris1"),
+								Conditions: discovery.EndpointConditions{
+									Ready:   pointer.BoolPtr(false),
+									Serving: pointer.BoolPtr(true),
+								},
+							},
+							{
+								Addresses: []string{
+									"2.3.4.15",
+								},
+								NodeName: stringPtr("iris2"),
+								Conditions: discovery.EndpointConditions{
+									Ready:   pointer.BoolPtr(false),
+									Serving: pointer.BoolPtr(true),
+								},
+							},
+						},
+					},
+				},
+				Type: epslices.Slices,
+			},
+			usableSpeakers:  map[string]bool{"iris1": true, "iris2": true},
+			cExpectedResult: []string{"iris1", "iris2"},
+		},
 	}
 
 	for _, test := range tests {
@@ -363,12 +402,12 @@ func TestShouldAnnounce(t *testing.T) {
 			desc:     "One service, two endpoints, one host, controller 1 should announce",
 			balancer: "test1",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -412,12 +451,12 @@ func TestShouldAnnounce(t *testing.T) {
 			desc:     "One service, two endpoints, one host, neither endpoint is ready, no controller should announce",
 			balancer: "test1",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -460,12 +499,12 @@ func TestShouldAnnounce(t *testing.T) {
 			desc:     "One service, two endpoints across two hosts, controller2 should announce",
 			balancer: "test1",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -508,7 +547,7 @@ func TestShouldAnnounce(t *testing.T) {
 			desc:     "One service, two endpoints across two hosts, advertisement only on node 1, controller1 should announce",
 			balancer: "test1",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR: []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: []*config.L2Advertisement{
@@ -519,7 +558,7 @@ func TestShouldAnnounce(t *testing.T) {
 							},
 						},
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -560,12 +599,12 @@ func TestShouldAnnounce(t *testing.T) {
 		}, {
 			desc: "One service, two endpoints across two hosts, neither endpoint is ready, no controllers should announce",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -607,12 +646,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "One service, two endpoints across two hosts, controller 2 is not ready, controller 1 should announce",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -656,12 +695,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "Two services each with two endpoints across across two hosts, controller 1 should announce the second, controller 2 the first",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -731,12 +770,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "Two services each with two endpoints across across two hosts, one service has an endpoint not ready on controller 2, controller 2 should not announce for the service with the not ready endpoint",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -808,12 +847,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "Two services each with two endpoints across across two hosts, one service has an endpoint not ready on controller 1, the other service has an endpoint not ready on controller 2. Each controller should announce for the service with the ready endpoint on that controller",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -887,12 +926,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "One service with three endpoints across across two hosts, controller 2 hosts two endpoints controller 2 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -938,12 +977,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "One service with three endpoints across across two hosts, controller 1 hosts two endpoints controller 2 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -989,12 +1028,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "One service with three endpoints across across two hosts, controller 2 hosts two endpoints, one of which is not ready, controller 1 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1042,12 +1081,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "One service with three endpoints across across two hosts, controller 1 hosts two endpoints, one of which is not ready, controller 2 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1095,12 +1134,12 @@ func TestShouldAnnounce(t *testing.T) {
 		{
 			desc: "One service with three endpoints across across two hosts, controller 2 hosts two endpoints, both of which are not ready, controller 1 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1160,14 +1199,14 @@ func TestShouldAnnounce(t *testing.T) {
 
 		for _, svc := range test.svcs {
 			lbIP := net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP)
-			lbIP_s := lbIP.String()
-			response1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "balancer", []net.IP{lbIP}, test.config.Pools["default"], svc, test.eps[lbIP_s])
-			response2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "balancer", []net.IP{lbIP}, test.config.Pools["default"], svc, test.eps[lbIP_s])
-			if response1 != test.c1ExpectedResult[lbIP_s] {
-				t.Errorf("%q: shouldAnnounce for controller 1 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIP_s, test.c1ExpectedResult[lbIP_s], response1)
+			lbIPStr := lbIP.String()
+			response1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "balancer", []net.IP{lbIP}, test.config.Pools.ByName["default"], svc, test.eps[lbIPStr], nil)
+			response2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "balancer", []net.IP{lbIP}, test.config.Pools.ByName["default"], svc, test.eps[lbIPStr], nil)
+			if response1 != test.c1ExpectedResult[lbIPStr] {
+				t.Errorf("%q: shouldAnnounce for controller 1 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIPStr, test.c1ExpectedResult[lbIPStr], response1)
 			}
-			if response2 != test.c2ExpectedResult[lbIP_s] {
-				t.Errorf("%q: shouldAnnounce for controller 2 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIP_s, test.c2ExpectedResult[lbIP_s], response2)
+			if response2 != test.c2ExpectedResult[lbIPStr] {
+				t.Errorf("%q: shouldAnnounce for controller 2 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIPStr, test.c2ExpectedResult[lbIPStr], response2)
 			}
 		}
 	}
@@ -1223,12 +1262,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 			desc:     "One service, two endpoints, one host, controller 1 should announce",
 			balancer: "test1",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1277,12 +1316,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service, two endpoints, one host, neither endpoint is ready, no controller should announce",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1331,12 +1370,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service, two endpoints across two hosts, controller2 should announce",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1367,7 +1406,8 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 									},
 									NodeName: stringPtr("iris2"),
 									Conditions: discovery.EndpointConditions{
-										Ready: pointer.BoolPtr(true),
+										Ready:   pointer.BoolPtr(false),
+										Serving: pointer.BoolPtr(true),
 									},
 								},
 							},
@@ -1385,12 +1425,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service, two endpoints across two hosts, neither endpoint is ready, no controllers should announce",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1439,12 +1479,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service, two endpoints across two hosts, controller 2 is not ready, controller 1 should announce",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1493,12 +1533,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "Two services each with two endpoints across across two hosts, each controller should announce one service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1583,12 +1623,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "Two services each with two endpoints across across two hosts, one service has an endpoint not ready on controller 2, each controller should announce one service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1673,12 +1713,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "Two services each with two endpoints across across two hosts, one service has an endpoint not ready on controller 1, the other service has an endpoint not ready on controller 2. Each controller should announce for the service with the ready endpoint on that controller",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1763,12 +1803,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service with three endpoints across across two hosts, controller 2 hosts two endpoints controller 2 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1830,12 +1870,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service with three endpoints across across two hosts, controller 1 hosts two endpoints controller 2 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1893,12 +1933,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service with three endpoints across across two hosts, controller 2 hosts two endpoints, one of which is not ready, controller 2 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -1956,12 +1996,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service with three endpoints across across two hosts, controller 1 hosts two endpoints, one of which is not ready, controller 1 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -2019,12 +2059,12 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 		}, {
 			desc: "One service with three endpoints across across two hosts, controller 2 hosts two endpoints, both of which are not ready, controller 1 should announce for the service",
 			config: &config.Config{
-				Pools: map[string]*config.Pool{
+				Pools: &config.Pools{ByName: map[string]*config.Pool{
 					"default": {
 						CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 						L2Advertisements: advertisementsForNode,
 					},
-				},
+				}},
 			},
 			svcs: []*v1.Service{
 				{
@@ -2095,14 +2135,14 @@ func TestShouldAnnounceEPSlices(t *testing.T) {
 
 		for _, svc := range test.svcs {
 			lbIP := net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP)
-			lbIP_s := lbIP.String()
-			response1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, test.config.Pools["default"], svc, test.eps[lbIP_s])
-			response2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, test.config.Pools["default"], svc, test.eps[lbIP_s])
-			if response1 != test.c1ExpectedResult[lbIP_s] {
-				t.Errorf("%q: shouldAnnounce for controller 1 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIP_s, test.c1ExpectedResult[lbIP_s], response1)
+			lbIPStr := lbIP.String()
+			response1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, test.config.Pools.ByName["default"], svc, test.eps[lbIPStr], nil)
+			response2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, test.config.Pools.ByName["default"], svc, test.eps[lbIPStr], nil)
+			if response1 != test.c1ExpectedResult[lbIPStr] {
+				t.Errorf("%q: shouldAnnounce for controller 1 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIPStr, test.c1ExpectedResult[lbIPStr], response1)
 			}
-			if response2 != test.c2ExpectedResult[lbIP_s] {
-				t.Errorf("%q: shouldAnnounce for controller 2 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIP_s, test.c2ExpectedResult[lbIP_s], response2)
+			if response2 != test.c2ExpectedResult[lbIPStr] {
+				t.Errorf("%q: shouldAnnounce for controller 2 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIPStr, test.c2ExpectedResult[lbIPStr], response2)
 			}
 		}
 	}
@@ -2310,12 +2350,12 @@ func TestShouldAnnounceNodeSelector(t *testing.T) {
 		}
 
 		cfg := config.Config{
-			Pools: map[string]*config.Pool{
+			Pools: &config.Pools{ByName: map[string]*config.Pool{
 				"default": {
 					CIDR:             []*net.IPNet{ipnet("10.20.30.0/24")},
 					L2Advertisements: test.L2Advertisements,
 				},
-			},
+			}},
 		}
 		if c1.SetConfig(l, &cfg) == controllers.SyncStateError {
 			t.Errorf("%q: SetConfig failed", test.desc)
@@ -2332,14 +2372,14 @@ func TestShouldAnnounceNodeSelector(t *testing.T) {
 		}
 
 		lbIP := net.ParseIP(svc.Status.LoadBalancer.Ingress[0].IP)
-		lbIP_s := lbIP.String()
-		response1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools["default"], &svc, test.eps[lbIP_s])
-		response2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools["default"], &svc, test.eps[lbIP_s])
-		if response1 != test.c1ExpectedResult[lbIP_s] {
-			t.Errorf("%q: shouldAnnounce for controller 1 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIP_s, test.c1ExpectedResult[lbIP_s], response1)
+		lbIPStr := lbIP.String()
+		response1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools.ByName["default"], &svc, test.eps[lbIPStr], nil)
+		response2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools.ByName["default"], &svc, test.eps[lbIPStr], nil)
+		if response1 != test.c1ExpectedResult[lbIPStr] {
+			t.Errorf("%q: shouldAnnounce for controller 1 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIPStr, test.c1ExpectedResult[lbIPStr], response1)
 		}
-		if response2 != test.c2ExpectedResult[lbIP_s] {
-			t.Errorf("%q: shouldAnnounce for controller 2 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIP_s, test.c2ExpectedResult[lbIP_s], response2)
+		if response2 != test.c2ExpectedResult[lbIPStr] {
+			t.Errorf("%q: shouldAnnounce for controller 2 for service %s returned incorrect result, expected '%s', but received '%s'", test.desc, lbIPStr, test.c2ExpectedResult[lbIPStr], response2)
 		}
 	}
 }
@@ -2378,7 +2418,7 @@ func TestClusterPolicy(t *testing.T) {
 	l := log.NewNopLogger()
 
 	cfg := &config.Config{
-		Pools: map[string]*config.Pool{
+		Pools: &config.Pools{ByName: map[string]*config.Pool{
 			"default": {
 				CIDR: []*net.IPNet{ipnet("10.20.30.0/24")},
 				L2Advertisements: []*config.L2Advertisement{
@@ -2390,7 +2430,7 @@ func TestClusterPolicy(t *testing.T) {
 					},
 				},
 			},
-		},
+		}},
 	}
 
 	if c1.SetConfig(l, cfg) == controllers.SyncStateError {
@@ -2467,11 +2507,11 @@ func TestClusterPolicy(t *testing.T) {
 		}
 
 		lbIP := net.ParseIP(ip)
-		response1svc1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools["default"], svc1, eps1)
-		response2svc1 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools["default"], svc1, eps1)
+		response1svc1 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools.ByName["default"], svc1, eps1, nil)
+		response2svc1 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools.ByName["default"], svc1, eps1, nil)
 
-		response1svc2 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools["default"], svc2, eps2)
-		response2svc2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools["default"], svc2, eps2)
+		response1svc2 := c1.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools.ByName["default"], svc2, eps2, nil)
+		response2svc2 := c2.protocolHandlers[config.Layer2].ShouldAnnounce(l, "test1", []net.IP{lbIP}, cfg.Pools.ByName["default"], svc2, eps2, nil)
 
 		// We check that only one speaker announces the service, so their response must be different
 		if response1svc1 == response2svc1 {
@@ -2523,7 +2563,7 @@ func TestIPAdvertisementFor(t *testing.T) {
 					AllInterfaces: true,
 				},
 			},
-			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, true, sets.NewString()),
+			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, true, sets.Set[string]{}),
 		}, {
 			desc:      "LocalNode doesn't match L2Advertisement",
 			ip:        net.IP{192, 168, 10, 3},
@@ -2542,7 +2582,7 @@ func TestIPAdvertisementFor(t *testing.T) {
 					Interfaces: []string{"eth3", "eth4"},
 				},
 			},
-			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, false, sets.NewString()),
+			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, false, sets.Set[string]{}),
 		}, {
 			desc:      "LocalNode only match one L2Advertisement",
 			ip:        net.ParseIP("2000:12"),
@@ -2562,7 +2602,7 @@ func TestIPAdvertisementFor(t *testing.T) {
 					Interfaces: []string{"eth1", "eth2"},
 				},
 			},
-			expect: layer2.NewIPAdvertisement(net.ParseIP("2000:12"), false, sets.NewString("eth1", "eth2")),
+			expect: layer2.NewIPAdvertisement(net.ParseIP("2000:12"), false, sets.New("eth1", "eth2")),
 		}, {
 			desc:      "LocalNode match multi-L2Advertisement",
 			ip:        net.IP{192, 168, 10, 3},
@@ -2588,7 +2628,7 @@ func TestIPAdvertisementFor(t *testing.T) {
 					Interfaces: []string{"eth4", "eth3"},
 				},
 			},
-			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, false, sets.NewString("eth0", "eth1", "eth2")),
+			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, false, sets.New("eth0", "eth1", "eth2")),
 		}, {
 			desc:      "LocalNode match multi-L2Advertisement, and one of them not specify interfaces",
 			ip:        net.IP{192, 168, 10, 3},
@@ -2614,7 +2654,7 @@ func TestIPAdvertisementFor(t *testing.T) {
 					Interfaces: []string{"eth4", "eth3"},
 				},
 			},
-			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, true, sets.NewString()),
+			expect: layer2.NewIPAdvertisement(net.IP{192, 168, 10, 3}, true, sets.Set[string]{}),
 		},
 	}
 	for _, test := range tests {

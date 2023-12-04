@@ -22,35 +22,31 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path"
 	"strings"
 	"testing"
 
-	"github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/config"
-	"github.com/onsi/ginkgo/reporters"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
-	"go.universe.tf/metallb/e2etest/bgptests"
-	"go.universe.tf/metallb/e2etest/l2tests"
-	testsconfig "go.universe.tf/metallb/e2etest/pkg/config"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/e2etest/pkg/metallb"
-	"go.universe.tf/metallb/e2etest/pkg/service"
-	"go.universe.tf/metallb/e2etest/webhookstests"
-	internalconfig "go.universe.tf/metallb/internal/config"
+	"go.universe.tf/e2etest/bgptests"
+	"go.universe.tf/e2etest/l2tests"
+	testsconfig "go.universe.tf/e2etest/pkg/config"
+	"go.universe.tf/e2etest/pkg/iprange"
+	"go.universe.tf/e2etest/pkg/k8s"
+	"go.universe.tf/e2etest/pkg/metallb"
+	"go.universe.tf/e2etest/pkg/service"
+	"go.universe.tf/e2etest/webhookstests"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/klog"
 	"k8s.io/kubernetes/test/e2e/framework"
 	e2econfig "k8s.io/kubernetes/test/e2e/framework/config"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 var (
 	skipDockerCmd       bool
-	ipv4ForContainers   string
-	ipv6ForContainers   string
 	useOperator         bool
 	reportPath          string
 	updater             testsconfig.Updater
@@ -60,6 +56,9 @@ var (
 	localNics           string
 	externalContainers  string
 	runOnHost           bool
+	bgpNativeMode       bool
+	frrImage            string
+	hostContainerMode   string
 )
 
 // handleFlags sets up all flags and parses the command line.
@@ -78,8 +77,6 @@ func handleFlags() {
 
 	flag.IntVar(&service.TestServicePort, "service-pod-port", 80, "port number that pod opens, default: 80")
 	flag.BoolVar(&skipDockerCmd, "skip-docker", false, "set this to true if the BGP daemon is running on the host instead of in a container")
-	flag.StringVar(&ipv4ForContainers, "ips-for-containers-v4", "0", "a comma separated list of IPv4 addresses available for containers")
-	flag.StringVar(&ipv6ForContainers, "ips-for-containers-v6", "0", "a comma separated list of IPv6 addresses available for containers")
 	flag.StringVar(&l2tests.IPV4ServiceRange, "ipv4-service-range", "0", "a range of IPv4 addresses for MetalLB to use when running in layer2 mode")
 	flag.StringVar(&l2tests.IPV6ServiceRange, "ipv6-service-range", "0", "a range of IPv6 addresses for MetalLB to use when running in layer2 mode")
 	flag.StringVar(&nodeNics, "node-nics", "", "node's interfaces list separated by comma and used when running in interface selector")
@@ -88,6 +85,10 @@ func handleFlags() {
 	flag.StringVar(&reportPath, "report-path", "/tmp/report", "the path to be used to dump test failure information")
 	flag.StringVar(&prometheusNamespace, "prometheus-namespace", "monitoring", "the namespace prometheus is running in (if running)")
 	flag.StringVar(&externalContainers, "external-containers", "", "a comma separated list of external containers names to use for the test. (valid parameters are: ibgp-single-hop / ibgp-multi-hop / ebgp-single-hop / ebgp-multi-hop)")
+	flag.BoolVar(&bgpNativeMode, "bgp-native-mode", false, "says if we are testing against a deployment using bgp native mode")
+	flag.StringVar(&frrImage, "frr-image", "quay.io/frrouting/frr:8.5.2", "the image to use for the external frr containers")
+	flag.StringVar(&hostContainerMode, "host-bgp-mode", string(bgptests.IBGPMode), "tells whether to run the host container in ebgp or ibgp mode")
+
 	flag.Parse()
 
 	if _, res := os.LookupEnv("RUN_FRR_CONTAINER_ON_HOST_NETWORK"); res {
@@ -111,50 +112,46 @@ func TestE2E(t *testing.T) {
 	if testing.Short() {
 		return
 	}
-	// Run tests through the Ginkgo runner with output to console + JUnit for reporting
-	var r []ginkgo.Reporter
-	if framework.TestContext.ReportDir != "" {
-		klog.Infof("Saving reports to %s", framework.TestContext.ReportDir)
-		if err := os.MkdirAll(framework.TestContext.ReportDir, 0755); err != nil {
-			klog.Errorf("Failed creating report directory: %v", err)
-		} else {
-			r = append(r, reporters.NewJUnitReporter(path.Join(framework.TestContext.ReportDir, fmt.Sprintf("junit_%v%02d.xml", framework.TestContext.ReportPrefix, config.GinkgoConfig.ParallelNode))))
-		}
-	}
+
 	gomega.RegisterFailHandler(framework.Fail)
-	ginkgo.RunSpecsWithDefaultAndCustomReporters(t, "E2E Suite", r)
+	ginkgo.RunSpecs(t, "E2E Suite")
 }
 
 var _ = ginkgo.BeforeSuite(func() {
+	log.SetLogger(zap.New(zap.WriteTo(ginkgo.GinkgoWriter), zap.UseDevMode(true)))
 	// Make sure the framework's kubeconfig is set.
 	framework.ExpectNotEqual(framework.TestContext.KubeConfig, "", fmt.Sprintf("%s env var not set", clientcmd.RecommendedConfigPathEnvVar))
 
 	// Validate the IPv4 service range.
-	_, err := internalconfig.ParseCIDR(l2tests.IPV4ServiceRange)
+	_, err := iprange.Parse(l2tests.IPV4ServiceRange)
 	framework.ExpectNoError(err)
 
 	// Validate the IPv6 service range.
-	_, err = internalconfig.ParseCIDR(l2tests.IPV6ServiceRange)
+	_, err = iprange.Parse(l2tests.IPV6ServiceRange)
 	framework.ExpectNoError(err)
 
 	cs, err := framework.LoadClientset()
 	framework.ExpectNoError(err)
-
-	v4Addresses := strings.Split(ipv4ForContainers, ",")
-	v6Addresses := strings.Split(ipv6ForContainers, ",")
 
 	switch {
 	case externalContainers != "":
 		bgptests.FRRContainers, err = bgptests.ExternalContainersSetup(externalContainers, cs)
 		framework.ExpectNoError(err)
 	case runOnHost:
-		bgptests.FRRContainers, err = bgptests.HostContainerSetup()
+		hostBGPMode := bgptests.HostBGPMode(hostContainerMode)
+		if hostBGPMode != bgptests.EBGPMode && hostBGPMode != bgptests.IBGPMode {
+			panic("host bgpmode " + hostContainerMode + " not supported")
+		}
+		bgptests.FRRContainers, err = bgptests.HostContainerSetup(frrImage, hostBGPMode)
 		framework.ExpectNoError(err)
 	default:
-		bgptests.FRRContainers, err = bgptests.KindnetContainersSetup(v4Addresses, v6Addresses, cs)
+		bgptests.FRRContainers, err = bgptests.KindnetContainersSetup(cs, frrImage)
 		framework.ExpectNoError(err)
-		bgptests.VRFFRRContainers, err = bgptests.VRFContainersSetup(cs)
-		framework.ExpectNoError(err)
+		if !bgpNativeMode {
+			vrfFRRContainers, err := bgptests.VRFContainersSetup(cs, frrImage)
+			framework.ExpectNoError(err)
+			bgptests.FRRContainers = append(bgptests.FRRContainers, vrfFRRContainers...)
+		}
 	}
 
 	clientconfig, err := framework.LoadConfig()
@@ -198,9 +195,12 @@ var _ = ginkgo.AfterSuite(func() {
 	cs, err := framework.LoadClientset()
 	framework.ExpectNoError(err)
 
-	toTearDown := append(bgptests.FRRContainers, bgptests.VRFFRRContainers...)
-	err = bgptests.InfraTearDown(cs, toTearDown)
+	err = bgptests.InfraTearDown(cs)
 	framework.ExpectNoError(err)
+	if !bgpNativeMode {
+		err = bgptests.InfraTearDownVRF(cs)
+		framework.ExpectNoError(err)
+	}
 	err = updater.Clean()
 	framework.ExpectNoError(err)
 

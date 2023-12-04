@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 
 	"github.com/pkg/errors"
 )
 
 type Neighbor struct {
-	Ip             net.IP
+	IP             net.IP
+	VRF            string
 	Connected      bool
 	LocalAS        string
 	RemoteAS       string
@@ -39,6 +41,7 @@ type FRRNeighbor struct {
 	BgpState          string       `json:"bgpState"`
 	PortForeign       int          `json:"portForeign"`
 	MsgStats          MessageStats `json:"messageStats"`
+	VRFName           string       `json:"vrf"`
 	AddressFamilyInfo map[string]struct {
 		SentPrefixCounter int `json:"sentPrefixCounter"`
 	} `json:"addressFamilyInfo"`
@@ -73,27 +76,28 @@ type FRRRoute struct {
 }
 
 type BFDPeer struct {
-	Multihop               bool   `json:"multihop"`
-	Peer                   string `json:"peer"`
-	Local                  string `json:"local"`
-	Vrf                    string `json:"vrf"`
-	Interface              string `json:"interface"`
-	ID                     int    `json:"id"`
-	RemoteID               int64  `json:"remote-id"`
-	PassiveMode            bool   `json:"passive-mode"`
-	Status                 string `json:"status"`
-	Uptime                 int    `json:"uptime"`
-	Diagnostic             string `json:"diagnostic"`
-	RemoteDiagnostic       string `json:"remote-diagnostic"`
-	ReceiveInterval        int    `json:"receive-interval"`
-	TransmitInterval       int    `json:"transmit-interval"`
-	EchoReceiveInterval    int    `json:"echo-receive-interval"`
-	EchoTransmitInterval   int    `json:"echo-transmit-interval"`
-	DetectMultiplier       int    `json:"detect-multiplier"`
-	RemoteReceiveInterval  int    `json:"remote-receive-interval"`
-	RemoteTransmitInterval int    `json:"remote-transmit-interval"`
-	RemoteEchoInterval     int    `json:"remote-echo-interval"`
-	RemoteDetectMultiplier int    `json:"remote-detect-multiplier"`
+	Multihop                  bool   `json:"multihop"`
+	Peer                      string `json:"peer"`
+	Local                     string `json:"local"`
+	Vrf                       string `json:"vrf"`
+	Interface                 string `json:"interface"`
+	ID                        int    `json:"id"`
+	RemoteID                  int64  `json:"remote-id"`
+	PassiveMode               bool   `json:"passive-mode"`
+	Status                    string `json:"status"`
+	Uptime                    int    `json:"uptime"`
+	Diagnostic                string `json:"diagnostic"`
+	RemoteDiagnostic          string `json:"remote-diagnostic"`
+	ReceiveInterval           int    `json:"receive-interval"`
+	TransmitInterval          int    `json:"transmit-interval"`
+	EchoReceiveInterval       int    `json:"echo-receive-interval"`
+	EchoTransmitInterval      int    `json:"echo-transmit-interval"`
+	DetectMultiplier          int    `json:"detect-multiplier"`
+	RemoteReceiveInterval     int    `json:"remote-receive-interval"`
+	RemoteTransmitInterval    int    `json:"remote-transmit-interval"`
+	RemoteEchoInterval        int    `json:"remote-echo-interval"`
+	RemoteEchoReceiveInterval int    `json:"remote-echo-receive-interval"`
+	RemoteDetectMultiplier    int    `json:"remote-detect-multiplier"`
 }
 
 // parseNeighbour takes the result of a show bgp neighbor x.y.w.z
@@ -124,7 +128,7 @@ func ParseNeighbour(vtyshRes string) (*Neighbor, error) {
 			prefixSent += s.SentPrefixCounter
 		}
 		return &Neighbor{
-			Ip:             ip,
+			IP:             ip,
 			Connected:      connected,
 			LocalAS:        strconv.Itoa(n.LocalAs),
 			RemoteAS:       strconv.Itoa(n.RemoteAs),
@@ -161,7 +165,7 @@ func ParseNeighbours(vtyshRes string) ([]*Neighbor, error) {
 			prefixSent += s.SentPrefixCounter
 		}
 		res = append(res, &Neighbor{
-			Ip:             ip,
+			IP:             ip,
 			Connected:      connected,
 			LocalAS:        strconv.Itoa(n.LocalAs),
 			RemoteAS:       strconv.Itoa(n.RemoteAs),
@@ -219,16 +223,25 @@ func ParseRoutes(vtyshRes string) (map[string]Route, error) {
 	return res, nil
 }
 
-func ParseBFDPeers(vtyshRes string) (map[string]BFDPeer, error) {
+func ParseBFDPeers(vtyshRes string) ([]BFDPeer, error) {
 	parseRes := []BFDPeer{}
 	err := json.Unmarshal([]byte(vtyshRes), &parseRes)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to parse vtysh response")
 	}
-	res := make(map[string]BFDPeer)
-	for _, p := range parseRes {
-		res[p.Peer] = p
+	return parseRes, nil
+}
 
+func ParseVRFs(vtyshRes string) ([]string, error) {
+	vrfs := map[string]interface{}{}
+	err := json.Unmarshal([]byte(vtyshRes), &vrfs)
+	if err != nil {
+		return nil, errors.Wrap(err, "parseVRFs: failed to parse vtysh response")
 	}
+	res := make([]string, 0)
+	for v := range vrfs {
+		res = append(res, v)
+	}
+	sort.Strings(res)
 	return res, nil
 }

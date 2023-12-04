@@ -4,11 +4,6 @@ description: "Install deps required for metallb CI"
 runs:
   using: "composite"
   steps:
-    - name: Cancel Previous Runs
-      uses: styfle/cancel-workflow-action@0.9.1
-      with:
-        access_token: ${{ github.token }}
-
     - uses: actions/setup-go@v3
       with:
         go-version-file: "go.mod"
@@ -20,8 +15,9 @@ runs:
         sudo apt-get update
         sudo apt-get install python3-pip arping ndisc6
         sudo pip3 install invoke semver pyyaml
-        GO111MODULE="on" go get sigs.k8s.io/kind@v0.15.0
+        GO111MODULE="on" go get sigs.k8s.io/kind@v0.19.0
         go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.7.0
+        go install github.com/onsi/ginkgo/v2/ginkgo@v2.4.0
 
     - name: Download MetalLB images
       uses: actions/download-artifact@v3

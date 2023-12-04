@@ -7,6 +7,7 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/google/go-cmp/cmp"
+	v1core "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -37,11 +38,16 @@ func TestValidateBGPAdvertisement(t *testing.T) {
 	getExistingIPAddressPools = func() (*IPAddressPoolList, error) {
 		return &IPAddressPoolList{}, nil
 	}
+	toRestoreNodes := getExistingNodes
+	getExistingNodes = func() (*v1core.NodeList, error) {
+		return &v1core.NodeList{}, nil
+	}
 
 	defer func() {
 		getExistingBGPAdvs = toRestore
 		getExistingAddressPools = toRestoreAddresspools
 		getExistingIPAddressPools = toRestoreIPAddressPools
+		getExistingNodes = toRestoreNodes
 	}()
 
 	tests := []struct {
@@ -138,9 +144,9 @@ func TestValidateBGPAdvertisement(t *testing.T) {
 		mock.forceError = test.failValidate
 
 		if test.isNew {
-			err = test.bgpAdv.ValidateCreate()
+			_, err = test.bgpAdv.ValidateCreate()
 		} else {
-			err = test.bgpAdv.ValidateUpdate(nil)
+			_, err = test.bgpAdv.ValidateUpdate(nil)
 		}
 		if test.failValidate && err == nil {
 			t.Fatalf("test %s failed, expecting error", test.desc)

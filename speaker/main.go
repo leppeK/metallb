@@ -21,6 +21,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"syscall"
 
 	"github.com/go-kit/log"
@@ -28,15 +30,17 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"go.universe.tf/metallb/internal/bgp"
 	"go.universe.tf/metallb/internal/config"
-	metallbcfg "go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/k8s"
 	"go.universe.tf/metallb/internal/k8s/controllers"
 	"go.universe.tf/metallb/internal/k8s/epslices"
+	k8snodes "go.universe.tf/metallb/internal/k8s/nodes"
+
 	"go.universe.tf/metallb/internal/layer2"
 	"go.universe.tf/metallb/internal/logging"
 	"go.universe.tf/metallb/internal/speakerlist"
 	"go.universe.tf/metallb/internal/version"
 	v1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/yaml"
 )
 
 var announcing = prometheus.NewGaugeVec(prometheus.GaugeOpts{
@@ -50,6 +54,10 @@ var announcing = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 	"node",
 	"ip",
 })
+
+const (
+	excludeL2ConfigPath = "/etc/metallb/excludel2.yaml"
+)
 
 // Service offers methods to mutate a Kubernetes service object.
 type service interface {
@@ -67,7 +75,7 @@ func main() {
 		mlBindAddr        = flag.String("ml-bindaddr", os.Getenv("METALLB_ML_BIND_ADDR"), "Bind addr for MemberList (fast dead node detection)")
 		mlBindPort        = flag.String("ml-bindport", os.Getenv("METALLB_ML_BIND_PORT"), "Bind port for MemberList (fast dead node detection)")
 		mlLabels          = flag.String("ml-labels", os.Getenv("METALLB_ML_LABELS"), "Labels to match the speakers (for MemberList / fast dead node detection)")
-		mlSecretKeyPath   = flag.String("ml-secret-key-path", os.Getenv("METALLB_ML_SECRET_KEY_PATH"), "Path to where the MembeList's secret key is mounted")
+		mlSecretKeyPath   = flag.String("ml-secret-key-path", os.Getenv("METALLB_ML_SECRET_KEY_PATH"), "Path to where the MemberList's secret key is mounted")
 		myNode            = flag.String("node-name", os.Getenv("METALLB_NODE_NAME"), "name of this Kubernetes node (spec.nodeName)")
 		port              = flag.Int("port", 7472, "HTTP listening port")
 		logLevel          = flag.String("log-level", "info", fmt.Sprintf("log level. must be one of: [%s]", logging.Levels.String()))
@@ -133,26 +141,39 @@ func main() {
 		os.Exit(1)
 	}
 
+	var interfacesToExclude *regexp.Regexp
+	interfacesToExclude, err = parseAnnouncedInterfacesToExclude()
+	if err != nil {
+		level.Error(logger).Log("op", "startup", "msg", "failed to parse announcedInterfacesToExclude from configMap", "error", err)
+		os.Exit(1)
+	}
+
 	// Setup all clients and speakers, config decides what is being done runtime.
 	ctrl, err := newController(controllerConfig{
-		MyNode:   *myNode,
-		Logger:   logger,
-		LogLevel: logging.Level(*logLevel),
-		SList:    sList,
-		bgpType:  bgpImplementation(bgpType),
+		MyNode:                 *myNode,
+		Namespace:              *namespace,
+		Logger:                 logger,
+		LogLevel:               logging.Level(*logLevel),
+		SList:                  sList,
+		bgpType:                bgpImplementation(bgpType),
+		InterfaceExcludeRegexp: interfacesToExclude,
 	})
 	if err != nil {
 		level.Error(logger).Log("op", "startup", "error", err, "msg", "failed to create MetalLB controller")
 		os.Exit(1)
 	}
 
-	var validateConfig metallbcfg.Validate
+	var validateConfig config.Validate
 	if bgpType == "native" {
-		validateConfig = metallbcfg.DiscardFRROnly
+		validateConfig = config.DiscardFRROnly
 	} else {
-		validateConfig = metallbcfg.DiscardNativeOnly
+		validateConfig = config.DiscardNativeOnly
 	}
 
+	listenFRRK8s := false
+	if bgpType == string(bgpFrrK8s) {
+		listenFRRK8s = true
+	}
 	client, err := k8s.New(&k8s.Config{
 		ProcessName:     "metallb-speaker",
 		NodeName:        *myNode,
@@ -172,12 +193,14 @@ func main() {
 		},
 		ValidateConfig:    validateConfig,
 		LoadBalancerClass: *loadBalancerClass,
+		WithFRRK8s:        listenFRRK8s,
 	})
 	if err != nil {
 		level.Error(logger).Log("op", "startup", "error", err, "msg", "failed to create k8s client")
 		os.Exit(1)
 	}
 	ctrl.client = client
+	ctrl.protocolHandlers[config.BGP].SetEventCallback(client.BGPEventCallback)
 
 	sList.Start(client)
 	defer sList.Stop()
@@ -190,6 +213,7 @@ func main() {
 
 type controller struct {
 	myNode  string
+	nodes   map[string]*v1.Node
 	bgpType bgpImplementation
 
 	config *config.Config
@@ -203,17 +227,20 @@ type controller struct {
 }
 
 type controllerConfig struct {
-	MyNode   string
-	Logger   log.Logger
-	LogLevel logging.Level
-	SList    SpeakerList
+	MyNode    string
+	Namespace string
+	Logger    log.Logger
+	LogLevel  logging.Level
+	SList     SpeakerList
 
 	bgpType bgpImplementation
 
 	// For testing only, and will be removed in a future release.
 	// See: https://github.com/metallb/metallb/issues/152.
-	DisableLayer2      bool
-	SupportedProtocols []config.Proto
+	DisableLayer2                bool
+	SupportedProtocols           []config.Proto
+	AnnouncedInterfacesToExclude []string `yaml:"announcedInterfacesToExclude"`
+	InterfaceExcludeRegexp       *regexp.Regexp
 }
 
 func newController(cfg controllerConfig) (*controller, error) {
@@ -223,13 +250,13 @@ func newController(cfg controllerConfig) (*controller, error) {
 			myNode:         cfg.MyNode,
 			svcAds:         make(map[string][]*bgp.Advertisement),
 			bgpType:        cfg.bgpType,
-			sessionManager: newBGP(cfg.bgpType, cfg.Logger, cfg.LogLevel),
+			sessionManager: newBGP(cfg),
 		},
 	}
 	protocols := []config.Proto{config.BGP}
 
 	if !cfg.DisableLayer2 {
-		a, err := layer2.New(cfg.Logger)
+		a, err := layer2.New(cfg.Logger, cfg.InterfaceExcludeRegexp)
 		if err != nil {
 			return nil, fmt.Errorf("making layer2 announcer: %s", err)
 		}
@@ -251,6 +278,8 @@ func newController(cfg controllerConfig) (*controller, error) {
 	}
 	ret.announced[config.BGP] = map[string]bool{}
 	ret.announced[config.Layer2] = map[string]bool{}
+
+	ret.nodes = make(map[string]*v1.Node)
 
 	return ret, nil
 }
@@ -295,11 +324,11 @@ func (c *controller) SetBalancer(l log.Logger, name string, svc *v1.Service, eps
 	}
 
 	l = log.With(l, "pool", poolName)
-	pool := c.config.Pools[poolName]
-	if pool == nil {
+	if c.config.Pools == nil || c.config.Pools.ByName[poolName] == nil {
 		level.Error(l).Log("bug", "true", "msg", "internal error: allocated IP has no matching address pool")
 		return c.deleteBalancer(l, name, "internalError")
 	}
+	pool := c.config.Pools.ByName[poolName]
 
 	if svcIPs, ok := c.svcIPs[name]; ok && !compareIPs(lbIPs, svcIPs) {
 		if st := c.deleteBalancer(l, name, "loadBalancerIPChanged"); st == controllers.SyncStateError {
@@ -322,7 +351,6 @@ func (c *controller) handleService(l log.Logger,
 	svc *v1.Service, pool *config.Pool,
 	eps epslices.EpsOrSlices,
 	protocol config.Proto) controllers.SyncState {
-
 	l = log.With(l, "protocol", protocol)
 	handler := c.protocolHandlers[protocol]
 	if handler == nil {
@@ -330,7 +358,7 @@ func (c *controller) handleService(l log.Logger,
 		return c.deleteBalancerProtocol(l, protocol, name, "internalError")
 	}
 
-	if deleteReason := handler.ShouldAnnounce(l, name, lbIPs, pool, svc, eps); deleteReason != "" {
+	if deleteReason := handler.ShouldAnnounce(l, name, lbIPs, pool, svc, eps, c.nodes); deleteReason != "" {
 		return c.deleteBalancerProtocol(l, protocol, name, deleteReason)
 	}
 
@@ -396,14 +424,17 @@ func (c *controller) deleteBalancerProtocol(l log.Logger, protocol config.Proto,
 			return controllers.SyncStateSuccess
 		}
 	}
-	delete(c.svcIPs, name)
 	level.Info(l).Log("event", "serviceWithdrawn", "ip", c.svcIPs[name], "reason", reason, "msg", "withdrawing service announcement")
+	delete(c.svcIPs, name)
 
 	return controllers.SyncStateSuccess
 }
 
-func poolFor(pools map[string]*config.Pool, ips []net.IP) string {
-	for pname, p := range pools {
+func poolFor(pools *config.Pools, ips []net.IP) string {
+	if pools == nil {
+		return ""
+	}
+	for pname, p := range pools.ByName {
 		cnt := 0
 		for _, ip := range ips {
 			for _, cidr := range p.CIDR {
@@ -440,8 +471,28 @@ func compareIPs(ips1, ips2 []net.IP) bool {
 	return true
 }
 
-func (c *controller) SetConfig(l log.Logger, cfg *config.Config) controllers.SyncState {
+func parseAnnouncedInterfacesToExclude() (*regexp.Regexp, error) {
+	configmapBytes, err := os.ReadFile(filepath.Clean(excludeL2ConfigPath))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
 
+	var conf controllerConfig
+	if err = yaml.Unmarshal(configmapBytes, &conf); err != nil {
+		return nil, err
+	}
+
+	var excludeRegexp *regexp.Regexp
+	if len(conf.AnnouncedInterfacesToExclude) > 0 {
+		excludeRegexp, err = regexp.Compile("(" + strings.Join(conf.AnnouncedInterfacesToExclude, ")|(") + ")")
+		if err != nil {
+			return nil, err
+		}
+	}
+	return excludeRegexp, nil
+}
+
+func (c *controller) SetConfig(l log.Logger, cfg *config.Config) controllers.SyncState {
 	level.Debug(l).Log("event", "startUpdate", "msg", "start of config update")
 	defer level.Debug(l).Log("event", "endUpdate", "msg", "end of config update")
 
@@ -458,7 +509,8 @@ func (c *controller) SetConfig(l log.Logger, cfg *config.Config) controllers.Syn
 	}
 
 	for proto, handler := range c.protocolHandlers {
-		if err := handler.SetConfig(l, cfg); err != nil {
+		err := handler.SetConfig(l, cfg)
+		if err != nil {
 			level.Error(l).Log("op", "setConfig", "protocol", proto, "error", err, "msg", "applying new configuration to protocol handler failed")
 			return controllers.SyncStateErrorNoRetry
 		}
@@ -470,22 +522,35 @@ func (c *controller) SetConfig(l log.Logger, cfg *config.Config) controllers.Syn
 }
 
 func (c *controller) SetNode(l log.Logger, node *v1.Node) controllers.SyncState {
+	conditionChanged := isNetworkConditionChanged(node.Name, c.nodes, node)
+	c.nodes[node.Name] = node
+
 	for proto, handler := range c.protocolHandlers {
 		if err := handler.SetNode(l, node); err != nil {
 			level.Error(l).Log("op", "setNode", "error", err, "protocol", proto, "msg", "failed to propagate node info to protocol handler")
 			return controllers.SyncStateError
 		}
 	}
+
+	if conditionChanged {
+		return controllers.SyncStateReprocessAll
+	}
+
 	return controllers.SyncStateSuccess
+}
+
+func isNetworkConditionChanged(nodeName string, oldNodes map[string]*v1.Node, newNode *v1.Node) bool {
+	return k8snodes.IsNetworkUnavailable(oldNodes[nodeName]) != k8snodes.IsNetworkUnavailable(newNode)
 }
 
 // A Protocol can advertise an IP address.
 type Protocol interface {
 	SetConfig(log.Logger, *config.Config) error
-	ShouldAnnounce(log.Logger, string, []net.IP, *config.Pool, *v1.Service, epslices.EpsOrSlices) string
+	ShouldAnnounce(log.Logger, string, []net.IP, *config.Pool, *v1.Service, epslices.EpsOrSlices, map[string]*v1.Node) string
 	SetBalancer(log.Logger, string, []net.IP, *config.Pool, service, *v1.Service) error
 	DeleteBalancer(log.Logger, string, string) error
 	SetNode(log.Logger, *v1.Node) error
+	SetEventCallback(func(interface{}))
 }
 
 // Speakerlist represents a list of healthy speakers.

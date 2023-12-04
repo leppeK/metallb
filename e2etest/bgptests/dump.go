@@ -9,16 +9,16 @@ import (
 	"path"
 	"strings"
 
-	"go.universe.tf/metallb/e2etest/pkg/executor"
-	"go.universe.tf/metallb/e2etest/pkg/frr"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/e2etest/pkg/metallb"
+	"go.universe.tf/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/frr"
+	"go.universe.tf/e2etest/pkg/k8s"
+	"go.universe.tf/e2etest/pkg/metallb"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 )
 
 func dumpBGPInfo(basePath, testName string, cs clientset.Interface, f *framework.Framework) {
-	testPath := path.Join(basePath, strings.Replace(testName, " ", "-", -1))
+	testPath := path.Join(basePath, strings.ReplaceAll(testName, " ", "-"))
 	err := os.Mkdir(testPath, 0755)
 	if err != nil && !errors.Is(err, os.ErrExist) {
 		fmt.Fprintf(os.Stderr, "failed to create test dir: %v\n", err)

@@ -31,6 +31,7 @@ type frrConfig struct {
 	Hostname    string
 	Routers     []*routerConfig
 	BFDProfiles []BFDProfile
+	ExtraConfig string
 }
 
 type reloadEvent struct {
@@ -62,19 +63,21 @@ type BFDProfile struct {
 }
 
 type neighborConfig struct {
-	IPFamily       ipfamily.Family
-	Name           string
-	ASN            uint32
-	Addr           string
-	SrcAddr        string
-	Port           uint16
-	HoldTime       uint64
-	KeepaliveTime  uint64
-	Password       string
-	Advertisements []*advertisementConfig
-	BFDProfile     string
-	EBGPMultiHop   bool
-	VRFName        string
+	IPFamily            ipfamily.Family
+	Name                string
+	ASN                 uint32
+	Addr                string
+	SrcAddr             string
+	Port                uint16
+	HoldTime            uint64
+	KeepaliveTime       uint64
+	Password            string
+	Advertisements      []*advertisementConfig
+	BFDProfile          string
+	EBGPMultiHop        bool
+	VRFName             string
+	HasV4Advertisements bool
+	HasV6Advertisements bool
 }
 
 func (n *neighborConfig) ID() string {
@@ -85,38 +88,36 @@ func (n *neighborConfig) ID() string {
 }
 
 type advertisementConfig struct {
-	IPFamily    ipfamily.Family
-	Prefix      string
-	Communities []string
-	LocalPref   uint32
+	IPFamily         ipfamily.Family
+	Prefix           string
+	Communities      []string
+	LargeCommunities []string
+	LocalPref        uint32
 }
 
-// routerName() defines the format of the key of the "Routers" map in the
+// RouterName() defines the format of the key of the "Routers" map in the
 // frrConfig struct.
-func routerName(srcAddr string, myASN uint32, vrfName string) string {
+func RouterName(srcAddr string, myASN uint32, vrfName string) string {
 	return fmt.Sprintf("%d@%s@%s", myASN, srcAddr, vrfName)
 }
 
 // neighborName() defines the format of key of the 'Neighbors' map in the
 // routerConfig struct.
-func neighborName(peerAddr string, ASN uint32, vrfName string) string {
+func NeighborName(peerAddr string, ASN uint32, vrfName string) string {
 	return fmt.Sprintf("%d@%s@%s", ASN, peerAddr, vrfName)
 }
 
 // templateConfig uses the template library to template
 // 'globalConfigTemplate' using 'data'.
 func templateConfig(data interface{}) (string, error) {
-	i := 0
-	currentCounterName := ""
+	counterMap := map[string]int{}
 	t, err := template.New("frr.tmpl").Funcs(
 		template.FuncMap{
 			"counter": func(counterName string) int {
-				if currentCounterName != counterName {
-					currentCounterName = counterName
-					i = 0
-				}
-				i++
-				return i
+				counter := counterMap[counterName]
+				counter++
+				counterMap[counterName] = counter
+				return counter
 			},
 			"frrIPFamily": func(ipFamily ipfamily.Family) string {
 				if ipFamily == "ipv6" {
@@ -129,6 +130,9 @@ func templateConfig(data interface{}) (string, error) {
 			},
 			"communityPrefixList": func(neighbor *neighborConfig, community string) string {
 				return fmt.Sprintf("%s-%s-%s-community-prefixes", neighbor.ID(), community, neighbor.IPFamily)
+			},
+			"largeCommunityPrefixList": func(neighbor *neighborConfig, community string) string {
+				return fmt.Sprintf("%s-large:%s-%s-community-prefixes", neighbor.ID(), community, neighbor.IPFamily)
 			},
 			"allowedPrefixList": func(neighbor *neighborConfig) string {
 				return fmt.Sprintf("%s-pl-%s", neighbor.ID(), neighbor.IPFamily)

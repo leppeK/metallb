@@ -18,16 +18,19 @@ package controllers
 
 import (
 	"context"
+	"reflect"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
 	"go.universe.tf/metallb/internal/config"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/source"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
 type PoolReconciler struct {
@@ -35,9 +38,10 @@ type PoolReconciler struct {
 	Logger         log.Logger
 	Scheme         *runtime.Scheme
 	Namespace      string
-	Handler        func(log.Logger, map[string]*config.Pool) SyncState
+	Handler        func(log.Logger, *config.Pools) SyncState
 	ValidateConfig config.Validate
 	ForceReload    func()
+	currentConfig  *config.Config
 }
 
 func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -63,15 +67,22 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, err
 	}
 
+	var namespaces corev1.NamespaceList
+	if err := r.List(ctx, &namespaces); err != nil {
+		level.Error(r.Logger).Log("controller", "ConfigReconciler", "message", "failed to get namespaces", "error", err)
+		return ctrl.Result{}, err
+	}
+
 	resources := config.ClusterResources{
 		Pools:              ipAddressPools.Items,
 		LegacyAddressPools: addressPools.Items,
 		Communities:        communities.Items,
+		Namespaces:         namespaces.Items,
 	}
 
 	level.Debug(r.Logger).Log("controller", "PoolReconciler", "metallb CRs", dumpClusterResources(&resources))
 
-	cfg, err := config.For(resources, r.ValidateConfig)
+	cfg, err := toConfig(resources, r.ValidateConfig)
 	if err != nil {
 		configStale.Set(1)
 		level.Error(r.Logger).Log("controller", "PoolReconciler", "error", "failed to parse the configuration", "error", err)
@@ -79,6 +90,10 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 
 	level.Debug(r.Logger).Log("controller", "PoolReconciler", "rendered config", dumpConfig(cfg))
+	if reflect.DeepEqual(r.currentConfig, cfg) {
+		level.Debug(r.Logger).Log("controller", "PoolReconciler", "event", "configuration did not change, ignoring")
+		return ctrl.Result{}, nil
+	}
 
 	res := r.Handler(r.Logger, cfg.Pools)
 	switch res {
@@ -86,7 +101,7 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		updateErrors.Inc()
 		configStale.Set(1)
 		level.Error(r.Logger).Log("controller", "PoolReconciler", "metallb CRs and Secrets", dumpClusterResources(&resources), "event", "reload failed, retry")
-		return ctrl.Result{}, retryError
+		return ctrl.Result{}, errRetry
 	case SyncStateReprocessAll:
 		level.Info(r.Logger).Log("controller", "PoolReconciler", "event", "force service reload")
 		r.ForceReload()
@@ -97,6 +112,8 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		return ctrl.Result{}, nil
 	}
 
+	r.currentConfig = cfg
+
 	configLoaded.Set(1)
 	configStale.Set(0)
 	level.Info(r.Logger).Log("controller", "PoolReconciler", "event", "config reloaded")
@@ -104,9 +121,16 @@ func (r *PoolReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 }
 
 func (r *PoolReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	p := predicate.Funcs{
+		UpdateFunc: func(e event.UpdateEvent) bool {
+			return filterNodeEvent(e) && filterNamespaceEvent(e)
+		},
+	}
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&metallbv1beta1.IPAddressPool{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.AddressPool{}}, &handler.EnqueueRequestForObject{}).
-		Watches(&source.Kind{Type: &metallbv1beta1.Community{}}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.AddressPool{}, &handler.EnqueueRequestForObject{}).
+		Watches(&metallbv1beta1.Community{}, &handler.EnqueueRequestForObject{}).
+		Watches(&corev1.Namespace{}, &handler.EnqueueRequestForObject{}).
+		WithEventFilter(p).
 		Complete(r)
 }

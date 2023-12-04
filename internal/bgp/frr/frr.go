@@ -15,6 +15,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"go.universe.tf/metallb/internal/bgp"
+	"go.universe.tf/metallb/internal/bgp/community"
 	metallbconfig "go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/ipfamily"
 	"go.universe.tf/metallb/internal/logging"
@@ -26,6 +27,7 @@ import (
 type sessionManager struct {
 	sessions     map[string]*session
 	bfdProfiles  []BFDProfile
+	extraConfig  string
 	reloadConfig chan reloadEvent
 	logLevel     string
 	sync.Mutex
@@ -44,8 +46,12 @@ var osHostname = os.Hostname
 
 // sessionName() defines the format of the key of the 'sessions' map in
 // the 'frrState' struct.
-func sessionName(myAddr string, myAsn uint32, addr string, asn uint32) string {
-	return fmt.Sprintf("%d@%s-%d@%s", asn, addr, myAsn, myAddr)
+func sessionName(s session) string {
+	baseName := fmt.Sprintf("%d@%s-%d@%s", s.PeerASN, s.PeerAddress, s.MyASN, s.SourceAddress)
+	if s.VRFName == "" {
+		return baseName
+	}
+	return baseName + "/" + s.VRFName
 }
 
 func validate(adv *bgp.Advertisement) error {
@@ -58,7 +64,7 @@ func validate(adv *bgp.Advertisement) error {
 func (s *session) Set(advs ...*bgp.Advertisement) error {
 	s.sessionManager.Lock()
 	defer s.sessionManager.Unlock()
-	sessionName := sessionName(s.SourceAddress.String(), s.MyASN, s.PeerAddress, s.PeerASN)
+	sessionName := sessionName(*s)
 	if _, found := s.sessionManager.sessions[sessionName]; !found {
 		return fmt.Errorf("session %s not established before advertisement", sessionName)
 	}
@@ -133,7 +139,7 @@ func (sm *sessionManager) addSession(s *session) error {
 	if s == nil {
 		return fmt.Errorf("invalid session")
 	}
-	sessionName := sessionName(s.SourceAddress.String(), s.MyASN, s.PeerAddress, s.PeerASN)
+	sessionName := sessionName(*s)
 	sm.sessions[sessionName] = s
 
 	return nil
@@ -143,9 +149,22 @@ func (sm *sessionManager) deleteSession(s *session) error {
 	if s == nil {
 		return fmt.Errorf("invalid session")
 	}
-	sessionName := sessionName(s.SourceAddress.String(), s.MyASN, s.PeerAddress, s.PeerASN)
+	sessionName := sessionName(*s)
 	delete(sm.sessions, sessionName)
 
+	return nil
+}
+
+func (sm *sessionManager) SyncExtraInfo(extraInfo string) error {
+	sm.Lock()
+	defer sm.Unlock()
+	sm.extraConfig = extraInfo
+	frrConfig, err := sm.createConfig()
+	if err != nil {
+		return err
+	}
+
+	sm.reloadConfig <- reloadEvent{config: frrConfig}
 	return nil
 }
 
@@ -154,7 +173,7 @@ func (sm *sessionManager) SyncBFDProfiles(profiles map[string]*metallbconfig.BFD
 	defer sm.Unlock()
 	sm.bfdProfiles = make([]BFDProfile, 0)
 	for _, p := range profiles {
-		frrProfile := configBFDProfileToFRR(p)
+		frrProfile := ConfigBFDProfileToFRR(p)
 		sm.bfdProfiles = append(sm.bfdProfiles, *frrProfile)
 	}
 	sort.Slice(sm.bfdProfiles, func(i, j int) bool {
@@ -180,6 +199,7 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 		Hostname:    hostname,
 		Loglevel:    sm.logLevel,
 		BFDProfiles: sm.bfdProfiles,
+		ExtraConfig: sm.extraConfig,
 	}
 
 	type router struct {
@@ -204,7 +224,7 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 		var exist bool
 		var rout *router
 
-		routerName := routerName(s.RouterID.String(), s.MyASN, s.VRFName)
+		routerName := RouterName(s.RouterID.String(), s.MyASN, s.VRFName)
 		if rout, exist = routers[routerName]; !exist {
 			rout = &router{
 				myASN:        s.MyASN,
@@ -219,7 +239,7 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 			routers[routerName] = rout
 		}
 
-		neighborName := neighborName(s.PeerAddress, s.PeerASN, s.VRFName)
+		neighborName := NeighborName(s.PeerAddress, s.PeerASN, s.VRFName)
 		if neighbor, exist = rout.neighbors[neighborName]; !exist {
 			host, port, err := net.SplitHostPort(s.PeerAddress)
 			if err != nil {
@@ -263,29 +283,37 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 			family := ipfamily.ForAddress(adv.Prefix.IP)
 
 			communities := make([]string, 0)
+			largeCommunities := make([]string, 0)
 
 			// Convert community 32bits value to : format
 			for _, c := range adv.Communities {
-				community := metallbconfig.CommunityToString(c)
-				communities = append(communities, community)
+				if community.IsLarge(c) {
+					largeCommunities = append(largeCommunities, c.String())
+					continue
+				}
+				communities = append(communities, c.String())
 			}
 
 			prefix := adv.Prefix.String()
 			advConfig := advertisementConfig{
-				IPFamily:    family,
-				Prefix:      prefix,
-				Communities: communities,
-				LocalPref:   adv.LocalPref,
+				IPFamily:         family,
+				Prefix:           prefix,
+				Communities:      sort.StringSlice(communities),
+				LargeCommunities: sort.StringSlice(largeCommunities),
+				LocalPref:        adv.LocalPref,
 			}
 
 			neighbor.Advertisements = append(neighbor.Advertisements, &advConfig)
 			switch family {
 			case ipfamily.IPv4:
 				rout.ipV4Prefixes[prefix] = prefix
+				neighbor.HasV4Advertisements = true
 			case ipfamily.IPv6:
 				rout.ipV6Prefixes[prefix] = prefix
+				neighbor.HasV6Advertisements = true
 			}
 		}
+		sortAdvertiesements(neighbor.Advertisements)
 	}
 
 	for _, r := range sortMap(routers) {
@@ -302,10 +330,30 @@ func (sm *sessionManager) createConfig() (*frrConfig, error) {
 	return config, nil
 }
 
+func (sm *sessionManager) SetEventCallback(func(interface{})) {}
+
 var debounceTimeout = 3 * time.Second
 var failureTimeout = time.Second * 5
 
-func NewSessionManager(l log.Logger, logLevel logging.Level) *sessionManager {
+func NewSessionManager(l log.Logger, logLevel logging.Level) bgp.SessionManager {
+	res := &sessionManager{
+		sessions:     map[string]*session{},
+		bfdProfiles:  []BFDProfile{},
+		reloadConfig: make(chan reloadEvent),
+		logLevel:     logLevelToFRR(logLevel),
+	}
+	reload := func(config *frrConfig) error {
+		return generateAndReloadConfigFile(config, l)
+	}
+
+	debouncer(reload, res.reloadConfig, debounceTimeout, failureTimeout, l)
+
+	reloadValidator(l, res.reloadConfig)
+
+	return res
+}
+
+func mockNewSessionManager(l log.Logger, logLevel logging.Level) *sessionManager {
 	res := &sessionManager{
 		sessions:     map[string]*session{},
 		bfdProfiles:  []BFDProfile{},
@@ -369,7 +417,7 @@ func validateReload(l log.Logger, prevReloadTimeStamp *string, reload chan<- rel
 	level.Info(l).Log("op", "reload-validate", "success", "reloaded config")
 }
 
-func configBFDProfileToFRR(p *metallbconfig.BFDProfile) *BFDProfile {
+func ConfigBFDProfileToFRR(p *metallbconfig.BFDProfile) *BFDProfile {
 	res := &BFDProfile{}
 	res.Name = p.Name
 	res.ReceiveInterval = p.ReceiveInterval
@@ -412,4 +460,36 @@ func sortMap[T any](toSort map[string]T) []T {
 		res = append(res, toSort[k])
 	}
 	return res
+}
+
+func sortAdvertiesements(toSort []*advertisementConfig) {
+	sort.Slice(toSort, func(i, j int) bool {
+		if toSort[i].IPFamily != toSort[j].IPFamily {
+			return toSort[i].IPFamily < toSort[j].IPFamily
+		}
+		if toSort[i].Prefix != toSort[j].Prefix {
+			return toSort[i].Prefix < toSort[j].Prefix
+		}
+		if toSort[i].LocalPref != toSort[j].LocalPref {
+			return toSort[i].LocalPref < toSort[j].LocalPref
+		}
+		if len(toSort[i].Communities) != len(toSort[j].Communities) {
+			return len(toSort[i].Communities) < len(toSort[j].Communities)
+		}
+		for k := range toSort[i].Communities {
+			if toSort[i].Communities[k] != toSort[j].Communities[k] {
+				return toSort[i].Communities[k] < toSort[j].Communities[k]
+			}
+		}
+		if len(toSort[i].LargeCommunities) != len(toSort[j].LargeCommunities) {
+			return len(toSort[i].LargeCommunities) < len(toSort[j].LargeCommunities)
+		}
+
+		for k := range toSort[i].LargeCommunities {
+			if toSort[i].LargeCommunities[k] != toSort[j].LargeCommunities[k] {
+				return toSort[i].LargeCommunities[k] < toSort[j].LargeCommunities[k]
+			}
+		}
+		return false
+	})
 }

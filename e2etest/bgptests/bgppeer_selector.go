@@ -10,19 +10,18 @@ import (
 
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
 	"go.universe.tf/metallb/api/v1beta2"
-	"go.universe.tf/metallb/e2etest/pkg/k8s"
-	"go.universe.tf/metallb/e2etest/pkg/metallb"
-	testservice "go.universe.tf/metallb/e2etest/pkg/service"
-	metallbconfig "go.universe.tf/metallb/internal/config"
-	"go.universe.tf/metallb/internal/ipfamily"
+	"go.universe.tf/e2etest/pkg/config"
+	"go.universe.tf/e2etest/pkg/ipfamily"
+	"go.universe.tf/e2etest/pkg/k8s"
+	"go.universe.tf/e2etest/pkg/metallb"
+	testservice "go.universe.tf/e2etest/pkg/service"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/onsi/ginkgo"
-	"github.com/onsi/ginkgo/extensions/table"
+	"github.com/onsi/ginkgo/v2"
 
-	frrconfig "go.universe.tf/metallb/e2etest/pkg/frr/config"
-	frrcontainer "go.universe.tf/metallb/e2etest/pkg/frr/container"
+	frrconfig "go.universe.tf/e2etest/pkg/frr/config"
+	frrcontainer "go.universe.tf/e2etest/pkg/frr/container"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	admissionapi "k8s.io/pod-security-admission/api"
@@ -35,9 +34,9 @@ var _ = ginkgo.Describe("BGP Peer Selector", func() {
 	var frrContainerForAdv2 *frrcontainer.FRR
 
 	ginkgo.AfterEach(func() {
-		if ginkgo.CurrentGinkgoTestDescription().Failed {
-			dumpBGPInfo(ReportPath, ginkgo.CurrentGinkgoTestDescription().TestText, cs, f)
-			k8s.DumpInfo(Reporter, ginkgo.CurrentGinkgoTestDescription().TestText)
+		if ginkgo.CurrentSpecReport().Failed() {
+			dumpBGPInfo(ReportPath, ginkgo.CurrentSpecReport().LeafNodeText, cs, f)
+			k8s.DumpInfo(Reporter, ginkgo.CurrentSpecReport().LeafNodeText)
 		}
 	})
 
@@ -78,14 +77,14 @@ var _ = ginkgo.Describe("BGP Peer Selector", func() {
 		frrContainerForAdv2 = frrContainersForAdvertisement[1]
 	})
 
-	table.DescribeTable("A service IP will not be advertised to peers outside the BGPAdvertisement peers list",
+	ginkgo.DescribeTable("A service IP will not be advertised to peers outside the BGPAdvertisement peers list",
 		func(addressRange1 []string, addressRange2 []string, ipFamily ipfamily.Family, tweak testservice.Tweak) {
 			for _, c := range FRRContainers {
 				err := frrcontainer.PairWithNodes(cs, c, ipFamily)
 				framework.ExpectNoError(err)
 			}
 
-			resources := metallbconfig.ClusterResources{
+			resources := config.Resources{
 				Peers: metallb.PeersForContainers(FRRContainers, ipFamily),
 			}
 
@@ -146,12 +145,12 @@ var _ = ginkgo.Describe("BGP Peer Selector", func() {
 			framework.ExpectNoError(err)
 
 			ginkgo.By(fmt.Sprintf("checking connectivity of service 1 to external frr container %s", frrContainerForAdv1.Name))
-			validateService(cs, svcAdvertisement1, allNodes.Items, frrContainerForAdv1)
+			validateService(svcAdvertisement1, allNodes.Items, frrContainerForAdv1)
 			ginkgo.By("checking service 1 not advertised to other frr containers")
 			validateServiceNotAdvertised(svcAdvertisement1, FRRContainers, frrContainerForAdv1.Name, ipFamily)
 
 			ginkgo.By(fmt.Sprintf("checking connectivity of service 2 to external frr container %s", frrContainerForAdv2.Name))
-			validateService(cs, svcAdvertisement2, allNodes.Items, frrContainerForAdv2)
+			validateService(svcAdvertisement2, allNodes.Items, frrContainerForAdv2)
 			ginkgo.By("checking service 2 not advertised to other frr containers")
 			validateServiceNotAdvertised(svcAdvertisement2, FRRContainers, frrContainerForAdv2.Name, ipFamily)
 
@@ -163,37 +162,37 @@ var _ = ginkgo.Describe("BGP Peer Selector", func() {
 
 			for _, c := range FRRContainers {
 				ginkgo.By(fmt.Sprintf("checking connectivity of service 1 to external frr container %s", c.Name))
-				validateService(cs, svcAdvertisement1, allNodes.Items, c)
+				validateService(svcAdvertisement1, allNodes.Items, c)
 			}
 
 			for _, c := range FRRContainers {
 				ginkgo.By(fmt.Sprintf("checking connectivity of service 2 to external frr container %s", c.Name))
-				validateService(cs, svcAdvertisement2, allNodes.Items, c)
+				validateService(svcAdvertisement2, allNodes.Items, c)
 			}
 		},
-		table.Entry("IPV4", []string{"192.168.10.0/24"},
+		ginkgo.Entry("IPV4", []string{"192.168.10.0/24"},
 			[]string{"192.168.16.0/24"}, ipfamily.IPv4, func(_ *corev1.Service) {}),
-		table.Entry("IPV6", []string{"fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18"},
+		ginkgo.Entry("IPV6", []string{"fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18"},
 			[]string{"fc00:f853:0ccd:e799::19-fc00:f853:0ccd:e799::26"}, ipfamily.IPv6, func(_ *corev1.Service) {}),
-		table.Entry("DUALSTACK", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18"},
+		ginkgo.Entry("DUALSTACK", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18"},
 			[]string{"192.168.16.0/24", "fc00:f853:0ccd:e799::19-fc00:f853:0ccd:e799::26"}, ipfamily.DualStack,
 			func(svc *corev1.Service) {
 				testservice.DualStack(svc)
 			}),
-		table.Entry("DUALSTACK - force V6 only", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18"},
+		ginkgo.Entry("DUALSTACK - force V6 only", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::0-fc00:f853:0ccd:e799::18"},
 			[]string{"192.168.16.0/24", "fc00:f853:0ccd:e799::19-fc00:f853:0ccd:e799::26"}, ipfamily.DualStack,
 			func(svc *corev1.Service) {
 				testservice.ForceV6(svc)
 			}))
 
-	table.DescribeTable("A service advertised through two different bgpadvertisements to two different peers",
+	ginkgo.DescribeTable("A service advertised through two different bgpadvertisements to two different peers",
 		func(addressRange []string, ipFamily ipfamily.Family, tweak testservice.Tweak) {
 			for _, c := range FRRContainers {
 				err := frrcontainer.PairWithNodes(cs, c, ipFamily)
 				framework.ExpectNoError(err)
 			}
 
-			resources := metallbconfig.ClusterResources{
+			resources := config.Resources{
 				Peers: metallb.PeersForContainers(FRRContainers, ipFamily),
 			}
 
@@ -263,14 +262,14 @@ var _ = ginkgo.Describe("BGP Peer Selector", func() {
 				}
 			}
 		},
-		table.Entry("IPV4", []string{"192.168.10.0/24"}, ipfamily.IPv4, func(_ *corev1.Service) {}),
-		table.Entry("IPV6", []string{"fc00:f853:0ccd:e799::/116"}, ipfamily.IPv6, func(_ *corev1.Service) {}),
-		table.Entry("DUALSTACK", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::/116"},
+		ginkgo.Entry("IPV4", []string{"192.168.10.0/24"}, ipfamily.IPv4, func(_ *corev1.Service) {}),
+		ginkgo.Entry("IPV6", []string{"fc00:f853:0ccd:e799::/116"}, ipfamily.IPv6, func(_ *corev1.Service) {}),
+		ginkgo.Entry("DUALSTACK", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::/116"},
 			ipfamily.DualStack,
 			func(svc *corev1.Service) {
 				testservice.DualStack(svc)
 			}),
-		table.Entry("DUALSTACK - force V6 only", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::/116"},
+		ginkgo.Entry("DUALSTACK - force V6 only", []string{"192.168.10.0/24", "fc00:f853:0ccd:e799::/116"},
 			ipfamily.DualStack,
 			func(svc *corev1.Service) {
 				testservice.ForceV6(svc)

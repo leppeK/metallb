@@ -22,13 +22,16 @@ import (
 	v1beta1 "go.universe.tf/metallb/api/v1beta1"
 	v1beta2 "go.universe.tf/metallb/api/v1beta2"
 	"go.universe.tf/metallb/internal/config"
+	"go.universe.tf/metallb/internal/k8s/epslices"
 	corev1 "k8s.io/api/core/v1"
 	discovery "k8s.io/api/discovery/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func newFakeClient(initObjects []client.Object) (client.WithWatch, error) {
+	scheme := runtime.NewScheme()
 	if err := v1beta1.AddToScheme(scheme); err != nil {
 		return nil, fmt.Errorf("v1beta1: add to scheme failed: %v", err)
 	}
@@ -45,7 +48,17 @@ func newFakeClient(initObjects []client.Object) (client.WithWatch, error) {
 		return nil, fmt.Errorf("discovery: add to scheme failed: %v", err)
 	}
 
-	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(initObjects...).Build(), nil
+	return fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(initObjects...).
+		WithIndex(&discovery.EndpointSlice{}, epslices.SlicesServiceIndexName, func(o client.Object) []string {
+			res, err := epslices.SlicesServiceIndex(o)
+			if err != nil {
+				return []string{}
+			}
+			return res
+		}).
+		Build(), nil
 }
 
 func objectsFromResources(r config.ClusterResources) []client.Object {
@@ -68,7 +81,6 @@ func objectsFromResources(r config.ClusterResources) []client.Object {
 
 	for _, bgpAdv := range r.BGPAdvs {
 		objects = append(objects, bgpAdv.DeepCopy())
-
 	}
 
 	for _, l2Adv := range r.L2Advs {

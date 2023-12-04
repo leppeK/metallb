@@ -12,7 +12,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"github.com/prometheus/common/model"
-	"go.universe.tf/metallb/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/executor"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -44,8 +44,8 @@ func ForPod(controller, target *corev1.Pod, namespace string) ([]map[string]*dto
 
 	podExecutor := executor.ForPod(namespace, controller.Name, "controller")
 	for _, p := range ports {
-		metricsUrl := path.Join(net.JoinHostPort(target.Status.PodIP, strconv.Itoa(p)), "metrics")
-		metrics, err := podExecutor.Exec("wget", "-qO-", metricsUrl)
+		metricsURL := path.Join(net.JoinHostPort(target.Status.PodIP, strconv.Itoa(p)), "metrics")
+		metrics, err := podExecutor.Exec("wget", "-qO-", metricsURL)
 		if err != nil {
 			return nil, errors.Wrapf(err, "failed to scrape metrics for %s", target.Name)
 		}
@@ -73,16 +73,27 @@ func GaugeForLabels(metricName string, labels map[string]string, metrics map[str
 	})
 }
 
-// ValidateGaugeValue checks that the value corresponing to the given metric is the same as expected value.
+// ValidateGaugeValue checks that the value corresponding to the given metric is the same as expected value.
 func ValidateGaugeValue(expectedValue int, metricName string, labels map[string]string, allMetrics []map[string]*dto.MetricFamily) error {
+	return ValidateGaugeValueCompare(func(value int) error {
+		if value != expectedValue {
+			return fmt.Errorf("expecting %d, got %d", expectedValue, value)
+		}
+		return nil
+	}, metricName, labels, allMetrics)
+}
+
+// ValidateGaugeValueCompare checks that the value corresponding to the given metric against the given compare function.
+func ValidateGaugeValueCompare(check func(int) error, metricName string, labels map[string]string, allMetrics []map[string]*dto.MetricFamily) error {
 	found := false
 	for _, m := range allMetrics {
 		value, err := GaugeForLabels(metricName, labels, m)
 		if err != nil {
 			continue
 		}
-		if value != expectedValue {
-			return fmt.Errorf("invalid value %d for %s, expecting %d", value, metricName, expectedValue)
+		err = check(value)
+		if err != nil {
+			return fmt.Errorf("invalid value %d for %s, %w", value, metricName, err)
 		}
 		found = true
 	}
@@ -91,7 +102,6 @@ func ValidateGaugeValue(expectedValue int, metricName string, labels map[string]
 		return fmt.Errorf("metric %s not found", metricName)
 	}
 	return nil
-
 }
 
 // ValidateCounterValue checks that the value related to the given metric is at most the expectedMax value.
@@ -124,7 +134,7 @@ func CounterForLabels(metricName string, labels map[string]string, metrics map[s
 	})
 }
 
-func GreaterThan(min int) func(value int) error {
+func GreaterOrEqualThan(min int) func(value int) error {
 	return func(value int) error {
 		if value < min {
 			return fmt.Errorf("value %d is less than %d", value, min)

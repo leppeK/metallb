@@ -151,8 +151,8 @@ func TestNeighbour(t *testing.T) {
 			if err != nil {
 				t.Fatal("Failed to parse ", err)
 			}
-			if !n.Ip.Equal(net.ParseIP(tt.neighborIP)) {
-				t.Fatal("Expected neighbour ip", tt.neighborIP, "got", n.Ip.String())
+			if !n.IP.Equal(net.ParseIP(tt.neighborIP)) {
+				t.Fatal("Expected neighbour ip", tt.neighborIP, "got", n.IP.String())
 			}
 			if n.RemoteAS != tt.remoteAS {
 				t.Fatal("Expected remote as", tt.remoteAS, "got", n.RemoteAS)
@@ -499,16 +499,16 @@ func TestNeighbours(t *testing.T) {
 		t.Fatalf("Expected 4 neighbours, got %d", len(nn))
 	}
 	sort.Slice(nn, func(i, j int) bool {
-		return (bytes.Compare(nn[i].Ip, nn[j].Ip) < 0)
+		return (bytes.Compare(nn[i].IP, nn[j].IP) < 0)
 	})
 
-	if !nn[0].Ip.Equal(net.ParseIP("172.18.0.2")) {
+	if !nn[0].IP.Equal(net.ParseIP("172.18.0.2")) {
 		t.Fatal("neighbour ip not matching")
 	}
-	if !nn[1].Ip.Equal(net.ParseIP("172.18.0.3")) {
+	if !nn[1].IP.Equal(net.ParseIP("172.18.0.3")) {
 		t.Fatal("neighbour ip not matching")
 	}
-	if !nn[2].Ip.Equal(net.ParseIP("172.18.0.4")) {
+	if !nn[2].IP.Equal(net.ParseIP("172.18.0.4")) {
 		t.Fatal("neighbour ip not matching")
 	}
 
@@ -694,14 +694,91 @@ func TestBFDPeers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to parse %s", err)
 	}
-	p, ok := peers["172.18.0.3"]
-	if !ok {
+	if len(peers) != 3 {
+		t.Fatal("Unexpected peer number", len(peers))
+	}
+	if peers[2].Peer != "172.18.0.3" {
 		t.Fatal("Peer not found")
 	}
-	if p.Status != "up" {
+	if peers[2].Status != "up" {
 		t.Fatal("wrong status")
 	}
-	if p.RemoteEchoInterval != 50 {
+	if peers[2].RemoteEchoInterval != 50 {
 		t.Fatal("wrong echo interval")
+	}
+}
+
+const vrfs = `{
+"default":{
+ "vrfId": 0,
+ "vrfName": "default",
+ "tableVersion": 1,
+ "routerId": "172.18.0.3",
+ "defaultLocPrf": 100,
+ "localAS": 64512,
+ "routes": { "192.168.10.0/32": [
+  {
+    "valid":true,
+    "bestpath":true,
+    "pathFrom":"external",
+    "prefix":"192.168.10.0",
+    "prefixLen":32,
+    "network":"192.168.10.0\/32",
+    "metric":0,
+    "weight":32768,
+    "peerId":"(unspec)",
+    "path":"",
+    "origin":"IGP",
+    "nexthops":[
+      {
+        "ip":"0.0.0.0",
+        "hostname":"kind-control-plane",
+        "afi":"ipv4",
+        "used":true
+      }
+    ]
+  }
+] }  }
+,
+"red":{
+ "vrfId": 5,
+ "vrfName": "red",
+ "tableVersion": 1,
+ "routerId": "172.31.0.4",
+ "defaultLocPrf": 100,
+ "localAS": 64512,
+ "routes": { "192.168.10.0/32": [
+  {
+    "valid":true,
+    "bestpath":true,
+    "pathFrom":"external",
+    "prefix":"192.168.10.0",
+    "prefixLen":32,
+    "network":"192.168.10.0\/32",
+    "metric":0,
+    "weight":32768,
+    "peerId":"(unspec)",
+    "path":"",
+    "origin":"IGP",
+    "nexthops":[
+      {
+        "ip":"0.0.0.0",
+        "hostname":"kind-control-plane",
+        "afi":"ipv4",
+        "used":true
+      }
+    ]
+  }
+] }  }
+}`
+
+func TestVRFs(t *testing.T) {
+	parsed, err := ParseVRFs(vrfs)
+	if err != nil {
+		t.Fatalf("Failed to parse %s", err)
+	}
+	expected := []string{"default", "red"}
+	if !cmp.Equal(parsed, expected) {
+		t.Fatalf("unexpected vrf list: %s", cmp.Diff(parsed, expected))
 	}
 }

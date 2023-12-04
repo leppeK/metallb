@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"sort"
 
 	"github.com/go-kit/log/level"
 
@@ -67,8 +68,14 @@ func (r *ServiceReconciler) reprocessAll(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, err
 	}
 
+	// Make it process the already assigned services first
+	sortedServices := services.Items
+	sort.Slice(sortedServices, func(i, j int) bool {
+		return len(sortedServices[i].Status.LoadBalancer.Ingress) > len(sortedServices[j].Status.LoadBalancer.Ingress)
+	})
+
 	retry := false
-	for _, service := range services.Items {
+	for _, service := range sortedServices {
 		service := service // so we can use &service
 		if filterByLoadBalancerClass(&service, r.LoadBalancerClass) {
 			level.Debug(r.Logger).Log("controller", "ServiceReconciler", "filtered service", req.NamespacedName)
@@ -99,8 +106,10 @@ func (r *ServiceReconciler) reprocessAll(ctx context.Context, req ctrl.Request) 
 		// in case we want to retry, we return an error to trigger the exponential backoff mechanism so that
 		// this controller won't loop at full speed
 		level.Info(r.Logger).Log("controller", "ServiceReconciler - reprocessAll", "event", "force service reload")
-		return ctrl.Result{}, retryError
+		return ctrl.Result{}, errRetry
 	}
+	r.initialLoadPerformed = true
+
 	return ctrl.Result{}, nil
 }
 

@@ -15,7 +15,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"unsafe"
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
@@ -50,7 +49,7 @@ type session struct {
 type sessionManager struct {
 }
 
-func NewSessionManager(l log.Logger) *sessionManager {
+func NewSessionManager(l log.Logger) bgp.SessionManager {
 	return &sessionManager{}
 }
 
@@ -76,8 +75,20 @@ func (sm *sessionManager) NewSession(l log.Logger, args bgp.SessionParameters) (
 }
 
 func (sm *sessionManager) SyncBFDProfiles(profiles map[string]*config.BFDProfile) error {
-	return errors.New("bfd profiles not supported in native mode")
+	if len(profiles) > 0 {
+		return errors.New("bfd profiles not supported in native mode")
+	}
+	return nil
 }
+
+func (sm *sessionManager) SyncExtraInfo(extras string) error {
+	if extras != "" {
+		return errors.New("bgp extra info not supported in native mode")
+	}
+	return nil
+}
+
+func (sm *sessionManager) SetEventCallback(func(interface{})) {}
 
 // run tries to stay connected to the peer, and pumps route updates to it.
 func (s *session) run() {
@@ -275,7 +286,7 @@ func (s *session) connect() error {
 	return nil
 }
 
-func hashRouterId(hostname string) (net.IP, error) {
+func hashRouterID(hostname string) (net.IP, error) {
 	buf := new(bytes.Buffer)
 	err := binary.Write(buf, binary.LittleEndian, crc32.ChecksumIEEE([]byte(hostname)))
 	if err != nil {
@@ -293,7 +304,7 @@ func getRouterID(addr net.IP, myNode string) (net.IP, error) {
 
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return hashRouterId(myNode)
+		return hashRouterID(myNode)
 	}
 	for _, i := range ifaces {
 		addrs, err := i.Addrs()
@@ -324,11 +335,11 @@ func getRouterID(addr net.IP, myNode string) (net.IP, error) {
 						return ip, nil
 					}
 				}
-				return hashRouterId(myNode)
+				return hashRouterID(myNode)
 			}
 		}
 	}
-	return hashRouterId(myNode)
+	return hashRouterID(myNode)
 }
 
 // sendKeepalives sends BGP KEEPALIVE packets at the negotiated rate
@@ -489,29 +500,10 @@ func (s *session) Close() error {
 	return nil
 }
 
-const (
-	// TCP MD5 Signature (RFC2385).
-	tcpMD5SIG = 14
-)
-
-// This  struct is defined at; linux-kernel: include/uapi/linux/tcp.h,
-// It  must be kept in sync with that definition, see current version:
-// https://github.com/torvalds/linux/blob/v4.16/include/uapi/linux/tcp.h#L253.
-
-//nolint:structcheck
-type tcpmd5sig struct {
-	ssFamily uint16
-	ss       [126]byte
-	pad1     uint16
-	keylen   uint16
-	pad2     uint32
-	key      [80]byte
-}
-
 // DialTCP does the part of creating a connection manually,  including setting the
-// proper TCP MD5 options when the password is not empty. Works by manupulating
+// proper TCP MD5 options when the password is not empty. Works by manipulating
 // the low level FD's, skipping the net.Conn API as it has not hooks to set
-// the neccessary sockopts for TCP MD5.
+// the necessary sockopts for TCP MD5.
 func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) (net.Conn, error) {
 	// If srcAddr exists on any of the local network interfaces, use it as the
 	// source address of the TCP socket. Otherwise, use the IPv6 unspecified
@@ -521,11 +513,11 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 	if srcAddr != nil {
 		ifs, err := net.Interfaces()
 		if err != nil {
-			return nil, fmt.Errorf("Querying local interfaces: %w", err)
+			return nil, fmt.Errorf("querying local interfaces: %w", err)
 		}
 
 		if !localAddressExists(ifs, srcAddr) {
-			return nil, fmt.Errorf("Address %q doesn't exist on this host", srcAddr)
+			return nil, fmt.Errorf("address %q doesn't exist on this host", srcAddr)
 		}
 
 		a = fmt.Sprintf("[%s]", srcAddr.String())
@@ -533,7 +525,7 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 
 	laddr, err := net.ResolveTCPAddr("tcp", fmt.Sprintf("%s:0", a))
 	if err != nil {
-		return nil, fmt.Errorf("Error resolving local address: %s ", err)
+		return nil, fmt.Errorf("error resolving local address: %s ", err)
 	}
 
 	raddr, err := net.ResolveTCPAddr("tcp", addr)
@@ -592,9 +584,8 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 
 	if password != "" {
 		sig := buildTCPMD5Sig(raddr.IP, password)
-		b := *(*[unsafe.Sizeof(sig)]byte)(unsafe.Pointer(&sig))
 		// Better way may be available in  Go 1.11, see go-review.googlesource.com/c/go/+/72810
-		if err = os.NewSyscallError("setsockopt", unix.SetsockoptString(fd, unix.IPPROTO_TCP, tcpMD5SIG, string(b[:]))); err != nil {
+		if err = os.NewSyscallError("setsockopt", unix.SetsockoptTCPMD5Sig(fd, unix.IPPROTO_TCP, unix.TCP_MD5SIG, sig)); err != nil {
 			return nil, err
 		}
 	}
@@ -665,20 +656,20 @@ func dialMD5(ctx context.Context, addr string, srcAddr net.IP, password string) 
 	}
 }
 
-func buildTCPMD5Sig(addr net.IP, key string) tcpmd5sig {
-	t := tcpmd5sig{}
+func buildTCPMD5Sig(addr net.IP, key string) *unix.TCPMD5Sig {
+	t := unix.TCPMD5Sig{}
 	if addr.To4() != nil {
-		t.ssFamily = unix.AF_INET
-		copy(t.ss[2:], addr.To4())
+		t.Addr.Family = unix.AF_INET
+		copy(t.Addr.Data[2:], addr.To4())
 	} else {
-		t.ssFamily = unix.AF_INET6
-		copy(t.ss[6:], addr.To16())
+		t.Addr.Family = unix.AF_INET6
+		copy(t.Addr.Data[6:], addr.To16())
 	}
 
-	t.keylen = uint16(len(key))
-	copy(t.key[0:], []byte(key))
+	t.Keylen = uint16(len(key))
+	copy(t.Key[0:], []byte(key))
 
-	return t
+	return &t
 }
 
 // localAddressExists returns true if the address addr exists on any of the

@@ -8,13 +8,13 @@ import (
 	"fmt"
 	"net/url"
 
-	"go.universe.tf/metallb/e2etest/pkg/executor"
+	"go.universe.tf/e2etest/pkg/executor"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 )
 
-// ValidateOnPrometheus checks the existance of the given metric directly on prometheus pods.
+// ValidateOnPrometheus checks the existence of the given metric directly on prometheus pods.
 func ValidateOnPrometheus(prometheusPod *corev1.Pod, query string, expected CheckType) error {
 	exec := executor.ForPod(prometheusPod.Namespace, prometheusPod.Name, prometheusPod.Spec.Containers[0].Name)
 	url := fmt.Sprintf("localhost:9090/api/v1/query?%s", (url.Values{"query": []string{query}}).Encode())

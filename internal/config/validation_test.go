@@ -83,6 +83,53 @@ func TestValidate(t *testing.T) {
 			mustFail: true,
 		},
 		{
+			desc: "large BGP community inside legacy pool",
+			config: ClusterResources{
+				LegacyAddressPools: []v1beta1.AddressPool{
+					{
+						Spec: v1beta1.AddressPoolSpec{
+							BGPAdvertisements: []v1beta1.LegacyBgpAdvertisement{
+								{
+									Communities: []string{"large:123:456:789"},
+								},
+							},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "large BGP community inside BGP Advertisement",
+			config: ClusterResources{
+				BGPAdvs: []v1beta1.BGPAdvertisement{
+					{
+						Spec: v1beta1.BGPAdvertisementSpec{
+							Communities: []string{"large:123:456:789"},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
+			desc: "large BGP community inside Community CR",
+			config: ClusterResources{
+				Communities: []v1beta1.Community{
+					{
+						Spec: v1beta1.CommunitySpec{
+							Communities: []v1beta1.CommunityAlias{
+								{
+									Value: "large:123:456:789",
+								},
+							},
+						},
+					},
+				},
+			},
+			mustFail: true,
+		},
+		{
 			desc: "should pass",
 			config: ClusterResources{
 				Peers: []v1beta2.BGPPeer{
@@ -251,6 +298,59 @@ func TestValidateFRR(t *testing.T) {
 			mustFail: true,
 		},
 		{
+			desc: "myAsn set, one different but with different vrf",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+							MyASN:   123,
+						},
+					},
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.5",
+							MyASN:   123,
+						},
+					},
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.6",
+							MyASN:   124,
+							VRFName: "red",
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "myAsn set, two different but with different vrf",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+							MyASN:   123,
+							VRFName: "red",
+						},
+					},
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.5",
+							MyASN:   123,
+							VRFName: "red",
+						},
+					},
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.6",
+							MyASN:   124,
+						},
+					},
+				},
+			},
+		},
+		{
 			desc: "duplicate bgp address",
 			config: ClusterResources{
 				Peers: []v1beta2.BGPPeer{
@@ -262,6 +362,52 @@ func TestValidateFRR(t *testing.T) {
 					{
 						Spec: v1beta2.BGPPeerSpec{
 							Address: "1.2.3.4",
+						},
+					},
+				},
+			},
+			mustFail: true,
+		}, {
+			desc: "duplicate bgp address, different vrfs",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+						},
+					},
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+							VRFName: "red",
+						},
+					}, {
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+							VRFName: "green",
+						},
+					},
+				},
+			},
+			mustFail: false,
+		}, {
+			desc: "duplicate bgp address, same vrf",
+			config: ClusterResources{
+				Peers: []v1beta2.BGPPeer{
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+						},
+					},
+					{
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+							VRFName: "red",
+						},
+					}, {
+						Spec: v1beta2.BGPPeerSpec{
+							Address: "1.2.3.4",
+							VRFName: "red",
 						},
 					},
 				},

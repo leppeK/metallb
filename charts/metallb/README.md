@@ -17,6 +17,7 @@ Kubernetes: `>= 1.19.0-0`
 | Repository | Name | Version |
 |------------|------|---------|
 |  | crds | 0.0.0 |
+| https://metallb.github.io/frr-k8s | frr-k8s | 0.0.1 |
 
 ## Values
 
@@ -24,9 +25,11 @@ Kubernetes: `>= 1.19.0-0`
 |-----|------|---------|-------------|
 | controller.affinity | object | `{}` |  |
 | controller.enabled | bool | `true` |  |
+| controller.extraContainers | list | `[]` |  |
 | controller.image.pullPolicy | string | `nil` |  |
 | controller.image.repository | string | `"quay.io/metallb/controller"` |  |
 | controller.image.tag | string | `nil` |  |
+| controller.labels | object | `{}` |  |
 | controller.livenessProbe.enabled | bool | `true` |  |
 | controller.livenessProbe.failureThreshold | int | `3` |  |
 | controller.livenessProbe.initialDelaySeconds | int | `10` |  |
@@ -52,9 +55,12 @@ Kubernetes: `>= 1.19.0-0`
 | controller.serviceAccount.create | bool | `true` |  |
 | controller.serviceAccount.name | string | `""` |  |
 | controller.strategy.type | string | `"RollingUpdate"` |  |
+| controller.tlsCipherSuites | string | `""` |  |
+| controller.tlsMinVersion | string | `"VersionTLS12"` |  |
 | controller.tolerations | list | `[]` |  |
 | crds.enabled | bool | `true` |  |
 | crds.validationFailurePolicy | string | `"Fail"` |  |
+| frrk8s.enabled | bool | `false` |  |
 | fullnameOverride | string | `""` |  |
 | imagePullSecrets | list | `[]` |  |
 | loadBalancerClass | string | `""` |  |
@@ -89,6 +95,7 @@ Kubernetes: `>= 1.19.0-0`
 | prometheus.prometheusRule.staleConfig.enabled | bool | `true` |  |
 | prometheus.prometheusRule.staleConfig.labels.severity | string | `"warning"` |  |
 | prometheus.rbacPrometheus | bool | `true` |  |
+| prometheus.rbacProxy.pullPolicy | string | `nil` |  |
 | prometheus.rbacProxy.repository | string | `"gcr.io/kubebuilder/kube-rbac-proxy"` |  |
 | prometheus.rbacProxy.tag | string | `"v0.12.0"` |  |
 | prometheus.scrapeAnnotations | bool | `false` |  |
@@ -108,16 +115,19 @@ Kubernetes: `>= 1.19.0-0`
 | rbac.create | bool | `true` |  |
 | speaker.affinity | object | `{}` |  |
 | speaker.enabled | bool | `true` |  |
-| speaker.frr.enabled | bool | `false` |  |
+| speaker.excludeInterfaces.enabled | bool | `true` |  |
+| speaker.extraContainers | list | `[]` |  |
+| speaker.frr.enabled | bool | `true` |  |
 | speaker.frr.image.pullPolicy | string | `nil` |  |
-| speaker.frr.image.repository | string | `"frrouting/frr"` |  |
-| speaker.frr.image.tag | string | `"v7.5.1"` |  |
+| speaker.frr.image.repository | string | `"quay.io/frrouting/frr"` |  |
+| speaker.frr.image.tag | string | `"8.5.2"` |  |
 | speaker.frr.metricsPort | int | `7473` |  |
 | speaker.frr.resources | object | `{}` |  |
 | speaker.frrMetrics.resources | object | `{}` |  |
 | speaker.image.pullPolicy | string | `nil` |  |
 | speaker.image.repository | string | `"quay.io/metallb/speaker"` |  |
 | speaker.image.tag | string | `nil` |  |
+| speaker.labels | object | `{}` |  |
 | speaker.livenessProbe.enabled | bool | `true` |  |
 | speaker.livenessProbe.failureThreshold | int | `3` |  |
 | speaker.livenessProbe.initialDelaySeconds | int | `10` |  |
@@ -126,6 +136,7 @@ Kubernetes: `>= 1.19.0-0`
 | speaker.livenessProbe.timeoutSeconds | int | `1` |  |
 | speaker.logLevel | string | `"info"` | Speaker log level. Must be one of: `all`, `debug`, `info`, `warn`, `error` or `none` |
 | speaker.memberlist.enabled | bool | `true` |  |
+| speaker.memberlist.mlBindAddrOverride | string | `""` |  |
 | speaker.memberlist.mlBindPort | int | `7946` |  |
 | speaker.memberlist.mlSecretKeyPath | string | `"/etc/ml_secret_key"` |  |
 | speaker.nodeSelector | object | `{}` |  |
@@ -140,9 +151,13 @@ Kubernetes: `>= 1.19.0-0`
 | speaker.reloader.resources | object | `{}` |  |
 | speaker.resources | object | `{}` |  |
 | speaker.runtimeClassName | string | `""` |  |
+| speaker.securityContext | object | `{}` |  |
 | speaker.serviceAccount.annotations | object | `{}` |  |
 | speaker.serviceAccount.create | bool | `true` |  |
 | speaker.serviceAccount.name | string | `""` |  |
+| speaker.startupProbe.enabled | bool | `true` |  |
+| speaker.startupProbe.failureThreshold | int | `30` |  |
+| speaker.startupProbe.periodSeconds | int | `5` |  |
 | speaker.tolerateMaster | bool | `true` |  |
 | speaker.tolerations | list | `[]` |  |
 | speaker.updateStrategy.type | string | `"RollingUpdate"` |  |

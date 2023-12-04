@@ -3,8 +3,10 @@
 package frr
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -15,7 +17,7 @@ import (
 
 	"github.com/go-kit/log"
 	"go.universe.tf/metallb/internal/bgp"
-	"go.universe.tf/metallb/internal/config"
+	"go.universe.tf/metallb/internal/bgp/community"
 	"go.universe.tf/metallb/internal/logging"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
@@ -31,11 +33,10 @@ func testOsHostname() (string, error) {
 }
 
 func testCompareFiles(t *testing.T, configFile, goldenFile string) {
-
 	var lastError error
 
 	// Try comparing files multiple times because tests can generate more than one configuration
-	err := wait.PollImmediate(10*time.Millisecond, 2*time.Second, func() (bool, error) {
+	err := wait.PollUntilContextTimeout(context.TODO(), 10*time.Millisecond, 2*time.Second, true, func(ctx context.Context) (bool, error) {
 		lastError = nil
 		cmd := exec.Command("diff", configFile, goldenFile)
 		output, err := cmd.Output()
@@ -82,6 +83,11 @@ func testSetup(t *testing.T) {
 }
 
 func testCheckConfigFile(t *testing.T) {
+	validateGoldenFile(t)
+	validateAgainstFRR(t)
+}
+
+func validateGoldenFile(t *testing.T) {
 	configFile, goldenFile := testGenerateFileNames(t)
 
 	if *update {
@@ -89,7 +95,10 @@ func testCheckConfigFile(t *testing.T) {
 	}
 
 	testCompareFiles(t, configFile, goldenFile)
+}
 
+func validateAgainstFRR(t *testing.T) {
+	configFile, _ := testGenerateFileNames(t)
 	if !strings.Contains(configFile, "Invalid") {
 		err := testFileIsValid(configFile)
 		if err != nil {
@@ -102,7 +111,7 @@ func TestSingleEBGPSessionMultiHop(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -129,7 +138,7 @@ func TestSingleEBGPSessionOneHop(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -157,7 +166,7 @@ func TestSingleIPv6EBGPSessionOneHop(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -185,7 +194,7 @@ func TestSingleIBGPSession(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -213,7 +222,7 @@ func TestSingleIPv6IBGPSession(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -240,7 +249,7 @@ func TestSingleSessionClose(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 
 	session, err := sessionManager.NewSession(l,
@@ -268,7 +277,7 @@ func TestTwoSessions(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session1, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -314,7 +323,7 @@ func TestTwoIPv6Sessions(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 
 	session1, err := sessionManager.NewSession(l,
@@ -359,7 +368,7 @@ func TestTwoSessionsDuplicate(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session1, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -404,7 +413,7 @@ func TestTwoSessionsDuplicateRouter(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 
 	session1, err := sessionManager.NewSession(l,
@@ -450,7 +459,7 @@ func TestSingleAdvertisement(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -474,11 +483,11 @@ func TestSingleAdvertisement(t *testing.T) {
 		IP:   net.ParseIP("172.16.1.10"),
 		Mask: classCMask,
 	}
-	communities := []uint32{}
-	community, _ := config.ParseCommunity("1111:2222")
-	communities = append(communities, community)
-	community, _ = config.ParseCommunity("3333:4444")
-	communities = append(communities, community)
+	communities := []community.BGPCommunity{}
+	community1, _ := community.New("1111:2222")
+	communities = append(communities, community1)
+	community2, _ := community.New("3333:4444")
+	communities = append(communities, community2)
 	adv := &bgp.Advertisement{
 		Prefix:      prefix,
 		Communities: communities,
@@ -497,7 +506,7 @@ func TestSingleAdvertisementNoRouterID(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -539,7 +548,7 @@ func TestSingleAdvertisementInvalidNoPort(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -567,7 +576,7 @@ func TestSingleAdvertisementStop(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -614,7 +623,7 @@ func TestSingleAdvertisementChange(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -669,7 +678,7 @@ func TestSingleAdvertisementWithPeerSelector(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 
 	session, err := sessionManager.NewSession(l,
@@ -694,11 +703,11 @@ func TestSingleAdvertisementWithPeerSelector(t *testing.T) {
 		IP:   net.ParseIP("172.16.1.10"),
 		Mask: classCMask,
 	}
-	communities := []uint32{}
-	community, _ := config.ParseCommunity("1111:2222")
-	communities = append(communities, community)
-	community, _ = config.ParseCommunity("3333:4444")
-	communities = append(communities, community)
+	communities := []community.BGPCommunity{}
+	community1, _ := community.New("1111:2222")
+	communities = append(communities, community1)
+	community2, _ := community.New("3333:4444")
+	communities = append(communities, community2)
 	adv := &bgp.Advertisement{
 		Prefix:      prefix,
 		Communities: communities,
@@ -718,7 +727,7 @@ func TestSingleAdvertisementNonExistingPeer(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -742,11 +751,11 @@ func TestSingleAdvertisementNonExistingPeer(t *testing.T) {
 		IP:   net.ParseIP("172.16.1.10"),
 		Mask: classCMask,
 	}
-	communities := []uint32{}
-	community, _ := config.ParseCommunity("1111:2222")
-	communities = append(communities, community)
-	community, _ = config.ParseCommunity("3333:4444")
-	communities = append(communities, community)
+	communities := []community.BGPCommunity{}
+	community1, _ := community.New("1111:2222")
+	communities = append(communities, community1)
+	community2, _ := community.New("3333:4444")
+	communities = append(communities, community2)
 	adv := &bgp.Advertisement{
 		Prefix:      prefix,
 		Communities: communities,
@@ -766,7 +775,7 @@ func TestTwoAdvertisements(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -790,8 +799,8 @@ func TestTwoAdvertisements(t *testing.T) {
 		IP:   net.ParseIP("172.16.1.10"),
 		Mask: classCMask,
 	}
-	communities := []uint32{}
-	community, _ := config.ParseCommunity("1111:2222")
+	communities := []community.BGPCommunity{}
+	community, _ := community.New("1111:2222")
 	communities = append(communities, community)
 	adv1 := &bgp.Advertisement{
 		Prefix:      prefix1,
@@ -819,84 +828,106 @@ func TestTwoAdvertisementsTwoSessions(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
-	session, err := sessionManager.NewSession(l,
-		bgp.SessionParameters{
-			PeerAddress:   "10.2.2.254:179",
-			SourceAddress: net.ParseIP("10.1.1.254"),
-			MyASN:         100,
-			RouterID:      net.ParseIP("10.1.1.254"),
-			PeerASN:       200,
-			HoldTime:      time.Second,
-			KeepAliveTime: time.Second,
-			Password:      "password",
-			CurrentNode:   "hostname",
-			EBGPMultiHop:  true,
-			SessionName:   "test-peer"})
-	if err != nil {
-		t.Fatalf("Could not create session: %s", err)
-	}
-	defer session.Close()
 
-	session1, err := sessionManager.NewSession(l,
-		bgp.SessionParameters{
-			PeerAddress:   "10.2.2.255:179",
-			SourceAddress: net.ParseIP("10.1.1.254"),
-			MyASN:         100,
-			RouterID:      net.ParseIP("10.1.1.254"),
-			PeerASN:       200,
-			HoldTime:      time.Second,
-			KeepAliveTime: time.Second,
-			Password:      "password",
-			CurrentNode:   "hostname",
-			EBGPMultiHop:  true,
-			SessionName:   "test-peer1"})
-	if err != nil {
-		t.Fatalf("Could not create session: %s", err)
-	}
-	defer session1.Close()
+	for i := 0; i < 100; i++ {
+		func() {
+			sessionsParameters := []bgp.SessionParameters{
+				{
+					PeerAddress:   "10.2.2.254:179",
+					SourceAddress: net.ParseIP("10.1.1.254"),
+					MyASN:         100,
+					RouterID:      net.ParseIP("10.1.1.254"),
+					PeerASN:       200,
+					HoldTime:      time.Second,
+					KeepAliveTime: time.Second,
+					Password:      "password",
+					CurrentNode:   "hostname",
+					EBGPMultiHop:  true,
+					SessionName:   "test-peer"},
+				{
+					PeerAddress:   "10.2.2.255:179",
+					SourceAddress: net.ParseIP("10.1.1.254"),
+					MyASN:         100,
+					RouterID:      net.ParseIP("10.1.1.254"),
+					PeerASN:       200,
+					HoldTime:      time.Second,
+					KeepAliveTime: time.Second,
+					Password:      "password",
+					CurrentNode:   "hostname",
+					EBGPMultiHop:  true,
+					SessionName:   "test-peer1"},
+			}
+			seed := time.Now().UnixNano()
+			rand.New(rand.NewSource(seed))
 
-	prefix1 := &net.IPNet{
-		IP:   net.ParseIP("172.16.1.10"),
-		Mask: classCMask,
-	}
-	communities := []uint32{}
-	community, _ := config.ParseCommunity("1111:2222")
-	communities = append(communities, community)
-	adv1 := &bgp.Advertisement{
-		Prefix:      prefix1,
-		Communities: communities,
-	}
+			rand.Shuffle(len(sessionsParameters), func(i, j int) {
+				sessionsParameters[i], sessionsParameters[j] = sessionsParameters[j], sessionsParameters[i]
+			})
 
-	prefix2 := &net.IPNet{
-		IP:   net.ParseIP("172.16.1.11"),
-		Mask: classCMask,
-	}
+			session, err := sessionManager.NewSession(l, sessionsParameters[0])
+			if err != nil {
+				t.Fatalf("Could not create session: %s", err)
+			}
+			defer session.Close()
 
-	adv2 := &bgp.Advertisement{
-		Prefix:      prefix2,
-		Communities: communities,
-		LocalPref:   2,
-	}
+			session1, err := sessionManager.NewSession(l, sessionsParameters[1])
+			if err != nil {
+				t.Fatalf("Could not create session: %s", err)
+			}
+			defer session1.Close()
 
-	err = session.Set(adv1, adv2)
-	if err != nil {
-		t.Fatalf("Could not advertise prefix: %s", err)
-	}
-	err = session1.Set(adv1, adv2)
-	if err != nil {
-		t.Fatalf("Could not advertise prefix: %s", err)
-	}
+			prefix1 := &net.IPNet{
+				IP:   net.ParseIP("172.16.1.10"),
+				Mask: classCMask,
+			}
+			communities := []community.BGPCommunity{}
+			community, _ := community.New("1111:2222")
+			communities = append(communities, community)
+			adv1 := &bgp.Advertisement{
+				Prefix:      prefix1,
+				Communities: communities,
+			}
 
-	testCheckConfigFile(t)
+			prefix2 := &net.IPNet{
+				IP:   net.ParseIP("172.16.1.11"),
+				Mask: classCMask,
+			}
+
+			adv2 := &bgp.Advertisement{
+				Prefix:      prefix2,
+				Communities: communities,
+				LocalPref:   2,
+			}
+			advs := []*bgp.Advertisement{adv1, adv2}
+			rand.Shuffle(len(advs), func(i, j int) {
+				advs[i], advs[j] = advs[j], advs[i]
+			})
+			err = session.Set(advs[0], advs[1])
+			if err != nil {
+				t.Fatalf("Could not advertise prefix: %s", err)
+			}
+
+			rand.Shuffle(len(advs), func(i, j int) {
+				advs[i], advs[j] = advs[j], advs[i]
+			})
+			err = session1.Set(advs[0], advs[1])
+			if err != nil {
+				t.Fatalf("Could not advertise prefix: %s", err)
+			}
+
+			validateGoldenFile(t)
+		}()
+	}
+	validateAgainstFRR(t)
 }
 
 func TestTwoAdvertisementsTwoSessionsOneWithPeerSelector(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelInfo)
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
 	defer close(sessionManager.reloadConfig)
 	session, err := sessionManager.NewSession(l,
 		bgp.SessionParameters{
@@ -938,8 +969,8 @@ func TestTwoAdvertisementsTwoSessionsOneWithPeerSelector(t *testing.T) {
 		IP:   net.ParseIP("172.16.1.10"),
 		Mask: classCMask,
 	}
-	communities := []uint32{}
-	community, _ := config.ParseCommunity("1111:2222")
+	communities := []community.BGPCommunity{}
+	community, _ := community.New("1111:2222")
 	communities = append(communities, community)
 	adv1 := &bgp.Advertisement{
 		Prefix:      prefix1,
@@ -970,11 +1001,43 @@ func TestTwoAdvertisementsTwoSessionsOneWithPeerSelector(t *testing.T) {
 	testCheckConfigFile(t)
 }
 
+func TestSingleSessionExtras(t *testing.T) {
+	testSetup(t)
+
+	l := log.NewNopLogger()
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
+	defer close(sessionManager.reloadConfig)
+	err := sessionManager.SyncExtraInfo("# hello")
+	if err != nil {
+		t.Fatalf("Could not sync extra info")
+	}
+	session, err := sessionManager.NewSession(l,
+		bgp.SessionParameters{
+			PeerAddress:   "127.0.0.2:179",
+			SourceAddress: net.ParseIP("10.1.1.254"),
+			MyASN:         100,
+			RouterID:      net.ParseIP("10.1.1.254"),
+			PeerASN:       200,
+			HoldTime:      time.Second,
+			KeepAliveTime: time.Second,
+			Password:      "password",
+			CurrentNode:   "hostname",
+			EBGPMultiHop:  false,
+			SessionName:   "test-peer"})
+
+	if err != nil {
+		t.Fatalf("Could not create session: %s", err)
+	}
+	defer session.Close()
+
+	testCheckConfigFile(t)
+}
+
 func TestLoggingConfiguration(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelWarn)
+	sessionManager := mockNewSessionManager(l, logging.LevelWarn)
 	defer close(sessionManager.reloadConfig)
 
 	config, err := sessionManager.createConfig()
@@ -990,7 +1053,7 @@ func TestLoggingConfigurationDebug(t *testing.T) {
 	testSetup(t)
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelDebug)
+	sessionManager := mockNewSessionManager(l, logging.LevelDebug)
 	defer close(sessionManager.reloadConfig)
 
 	config, err := sessionManager.createConfig()
@@ -1010,7 +1073,7 @@ func TestLoggingConfigurationOverrideByEnvironmentVar(t *testing.T) {
 	t.Cleanup(func() { os.Setenv("FRR_LOGGING_LEVEL", orig) })
 
 	l := log.NewNopLogger()
-	sessionManager := NewSessionManager(l, logging.LevelDebug)
+	sessionManager := mockNewSessionManager(l, logging.LevelDebug)
 	defer close(sessionManager.reloadConfig)
 
 	config, err := sessionManager.createConfig()
@@ -1019,5 +1082,54 @@ func TestLoggingConfigurationOverrideByEnvironmentVar(t *testing.T) {
 	}
 
 	sessionManager.reloadConfig <- reloadEvent{config: config}
+	testCheckConfigFile(t)
+}
+
+func TestLargeCommunities(t *testing.T) {
+	testSetup(t)
+
+	l := log.NewNopLogger()
+	sessionManager := mockNewSessionManager(l, logging.LevelInfo)
+	defer close(sessionManager.reloadConfig)
+	session, err := sessionManager.NewSession(l,
+		bgp.SessionParameters{
+			PeerAddress:   "10.2.2.254:179",
+			SourceAddress: net.ParseIP("10.1.1.254"),
+			MyASN:         100,
+			RouterID:      net.ParseIP("10.1.1.254"),
+			PeerASN:       200,
+			HoldTime:      time.Second,
+			KeepAliveTime: time.Second,
+			Password:      "password",
+			CurrentNode:   "hostname",
+			EBGPMultiHop:  true,
+			SessionName:   "test-peer"})
+	if err != nil {
+		t.Fatalf("Could not create session: %s", err)
+	}
+	defer session.Close()
+
+	prefix := &net.IPNet{
+		IP:   net.ParseIP("172.16.1.10"),
+		Mask: classCMask,
+	}
+	communities := []community.BGPCommunity{}
+	community1, _ := community.New("large:1111:2222:3333")
+	communities = append(communities, community1)
+	community2, _ := community.New("large:2222:3333:4444")
+	communities = append(communities, community2)
+	community3, _ := community.New("3333:4444")
+	communities = append(communities, community3)
+	adv := &bgp.Advertisement{
+		Prefix:      prefix,
+		Communities: communities,
+		LocalPref:   300,
+	}
+
+	err = session.Set(adv)
+	if err != nil {
+		t.Fatalf("Could not advertise prefix: %s", err)
+	}
+
 	testCheckConfigFile(t)
 }

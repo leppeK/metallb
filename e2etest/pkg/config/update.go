@@ -7,7 +7,6 @@ import (
 
 	metallbv1beta1 "go.universe.tf/metallb/api/v1beta1"
 	metallbv1beta2 "go.universe.tf/metallb/api/v1beta2"
-	"go.universe.tf/metallb/internal/config"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
@@ -15,8 +14,22 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
 
+type Resources struct {
+	Pools              []metallbv1beta1.IPAddressPool    `json:"ipaddresspools"`
+	Peers              []metallbv1beta2.BGPPeer          `json:"bgppeers"`
+	BFDProfiles        []metallbv1beta1.BFDProfile       `json:"bfdprofiles"`
+	BGPAdvs            []metallbv1beta1.BGPAdvertisement `json:"bgpadvertisements"`
+	L2Advs             []metallbv1beta1.L2Advertisement  `json:"l2advertisements"`
+	LegacyAddressPools []metallbv1beta1.AddressPool      `json:"legacyaddresspools"`
+	Communities        []metallbv1beta1.Community        `json:"communities"`
+	PasswordSecrets    map[string]corev1.Secret          `json:"passwordsecrets"`
+	Nodes              []corev1.Node                     `json:"nodes"`
+	Namespaces         []corev1.Namespace                `json:"namespaces"`
+	BGPExtras          corev1.ConfigMap                  `json:"bgpextras"`
+}
+
 type Updater interface {
-	Update(r config.ClusterResources) error
+	Update(r Resources) error
 	Clean() error
 	Client() client.Client
 	Namespace() string
@@ -27,7 +40,7 @@ type beta1Updater struct {
 	namespace string
 }
 
-func UpdaterForCRs(r *rest.Config, ns string) (*beta1Updater, error) {
+func UpdaterForCRs(r *rest.Config, ns string) (Updater, error) {
 	myScheme := runtime.NewScheme()
 
 	if err := metallbv1beta1.AddToScheme(myScheme); err != nil {
@@ -56,7 +69,7 @@ func UpdaterForCRs(r *rest.Config, ns string) (*beta1Updater, error) {
 	}, nil
 }
 
-func (o beta1Updater) Update(r config.ClusterResources) error {
+func (o beta1Updater) Update(r Resources) error {
 	// we fill a map of objects to keep the order we add the resources random, as
 	// it would happen by throwing a set of manifests against a cluster, hoping to
 	// find corner cases that we would not find by adding them always in the same
@@ -67,49 +80,49 @@ func (o beta1Updater) Update(r config.ClusterResources) error {
 	for _, pool := range r.Pools {
 		objects[key] = pool.DeepCopy()
 		oldValues[key] = pool.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, secret := range r.PasswordSecrets {
 		objects[key] = secret.DeepCopy()
 		oldValues[key] = secret.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, peer := range r.Peers {
 		objects[key] = peer.DeepCopy()
 		oldValues[key] = peer.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, bfdProfile := range r.BFDProfiles {
 		objects[key] = bfdProfile.DeepCopy()
 		oldValues[key] = bfdProfile.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, bgpAdv := range r.BGPAdvs {
 		objects[key] = bgpAdv.DeepCopy()
 		oldValues[key] = bgpAdv.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, l2Adv := range r.L2Advs {
 		objects[key] = l2Adv.DeepCopy()
 		oldValues[key] = l2Adv.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, legacyPool := range r.LegacyAddressPools {
 		objects[key] = legacyPool.DeepCopy()
 		oldValues[key] = legacyPool.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	for _, community := range r.Communities {
 		objects[key] = community.DeepCopy()
 		oldValues[key] = community.DeepCopy()
-		key = key + 1
+		key++
 	}
 
 	// Iterating over the map will return the items in a random order.
